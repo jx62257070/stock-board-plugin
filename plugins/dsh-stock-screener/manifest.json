@@ -1,0 +1,9 @@
+{
+  "id": "dsh-stock-screener",
+  "name": "选股器",
+  "version": "1.0.0",
+  "description": "左侧导航新增「选股器」页面：基础筛选（全市场条件筛选 + MA5/20 金叉回测）、信号扫描（股票池 × MA/MACD/RSI/BOLL 信号模板）、尾盘选股（市值/量比/涨幅/换手过滤 + 分时强度精筛）。重接口全部由用户点击触发。",
+  "author": "内置",
+  "entry": "main.js",
+  "readme": "README.md"
+}

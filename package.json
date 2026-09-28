@@ -1,6 +1,6 @@
 {
   "name": "tauri-plugin",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "description": "WHF 股票看板的官方插件源码与分发产物（宿主应用仓库：whf-stock-board）",
@@ -10,6 +10,7 @@
     "build:dividend": "node scripts/build-plugins.mjs dsh-dividend-screen",
     "build:note": "node scripts/build-plugins.mjs dsh-quick-note",
     "build:watch": "node scripts/build-plugins.mjs dsh-sidebar-watch",
+    "build:screener": "node scripts/build-plugins.mjs dsh-stock-screener",
     "sync:host": "node scripts/sync-host-contract.mjs",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "lint": "eslint plugins scripts",
@@ -23,6 +24,7 @@
     "@tauri-apps/api": "^2.11.1",
     "@types/node": "^24.13.3",
     "@vitejs/plugin-vue": "^6.0.8",
+    "dayjs": "^1.11.13",
     "eslint": "^10.10.0",
     "eslint-plugin-jsdoc": "^64.3.9",
     "eslint-plugin-vue": "^10.11.0",

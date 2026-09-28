@@ -25,6 +25,7 @@ WHF 股票看板本身只保留插件内核与开放能力（贡献点、`ctx.*`
 | `dsh-dividend-screen` | 股息筛选 | 按股息率 / 分红连续性筛样本，叠加今年推算股息率，表格列可配置 | [说明](./plugins/dsh-dividend-screen/README.md) |
 | `dsh-quick-note` | 速记 | 侧栏抽屉随手记，可关联个股；对外提供 `note:repo` 服务 | [说明](./plugins/dsh-quick-note/README.md) |
 | `dsh-sidebar-watch` | 自选盯盘 | 顶栏轮播 + 到价 / 涨跌幅提醒，候选池与盯盘引擎可被其他插件复用；含任务栏小组件（可选，默认开启） | [说明](./plugins/dsh-sidebar-watch/README.md) |
+| `dsh-stock-screener` | 选股器 | 基础筛选（条件筛选 + MA 金叉回测）、信号扫描（股票池 × 八种技术信号）、尾盘选股（分时强度精筛）；自宿主 v3.3.0 起由内置页迁移为插件 | [说明](./plugins/dsh-stock-screener/README.md) |
 
 ## 安装方式
 
