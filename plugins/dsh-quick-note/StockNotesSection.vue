@@ -25,7 +25,9 @@ import {
  * v1.2.0：就地追加的输入区改为**悬浮速记条** —— 它经 `position: fixed`
  * 贴住个股详情面板（`aside.dock-panel`）的底缘，打开详情即可见，
  * 不用再滚到面板最底部才能记一笔；下方的归档列表保持原位，
- * 悬浮条上的「查看」按钮一键滚过去。
+ * 悬浮条上的「查看」按钮一键滚过去。悬浮条会盖住滚动内容的最底部，
+ * 所以内容末尾有一个与它等高的垫高占位（随输入框生长实时更新），
+ * 保证滚到底时归档列表完整可见。
  *
  * 定位不走 Teleport / 不碰宿主 DOM 结构：组件就挂在面板内容里，
  * 从根元素 `closest('.dock-panel')` 拿到面板矩形，`fixed` 对齐即可
@@ -54,11 +56,17 @@ const BAR_Z_INDEX = 30;
 /** 输入框自适应高度上限（超出后内部滚动） */
 const BAR_INPUT_MAX_HEIGHT_PX = 120;
 
+/** 垫高占位比悬浮条实际高度多留的呼吸间隙 */
+const BAR_SPACER_GAP_PX = 8;
+
 /** 就地输入的草稿 */
 const draft = ref('');
 
 /** 悬浮条的输入框（自适应高度用） */
 const draftEl = ref<HTMLTextAreaElement | null>(null);
+
+/** 悬浮条元素（垫高占位按它的实际高度算） */
+const barEl = ref<HTMLElement | null>(null);
 
 /** 组件根元素（向上找宿主面板的起点） */
 const rootEl = ref<HTMLElement | null>(null);
@@ -68,6 +76,13 @@ const archiveEl = ref<HTMLElement | null>(null);
 
 /** 悬浮条定位样式（挂载测量后填充；未就绪前先隐藏避免闪跳） */
 const barStyle = ref<Record<string, string>>({ position: 'fixed', visibility: 'hidden' });
+
+/**
+ * 内容末尾的垫高占位（悬浮条是 fixed 的，会盖住滚动内容最底部 ——
+ * 占位与它等高，滚到底时归档列表的最后几条不会被压在输入条下面；
+ * 输入框多行生长时随 ResizeObserver 实时更新）
+ */
+const spacerStyle = ref<Record<string, string>>({ height: '0px' });
 
 /** 关联了当前股票的速记（新的在前，响应式） */
 const notes = computed<readonly QuickNote[]>(() => props.repo.listBySymbol(props.symbol));
@@ -154,11 +169,11 @@ const relativeTime = (timestamp: number): string => props.deps.format.relativeTi
 /** 找到的宿主面板元素（mounted 时解析，找不到则放弃悬浮降级为流内布局） */
 let panelEl: HTMLElement | null = null;
 
-/** 面板尺寸监听（dock 拖宽时跟随重排） */
+/** 面板 / 悬浮条尺寸监听（dock 拖宽、输入框多行生长时跟随重排） */
 let resizeObserver: ResizeObserver | null = null;
 
 /**
- * 按面板当前矩形重算悬浮条的 fixed 定位
+ * 按面板当前矩形重算悬浮条的 fixed 定位，并按悬浮条实际高度同步垫高占位
  */
 const syncBarStyle = (): void => {
   if (!panelEl) return;
@@ -170,6 +185,9 @@ const syncBarStyle = (): void => {
     bottom: `${Math.max(window.innerHeight - rect.bottom, 0) + BAR_INSET_PX}px`,
     width: `${Math.max(rect.width - BAR_INSET_PX * 2, 0)}px`,
     zIndex: String(BAR_Z_INDEX),
+  };
+  spacerStyle.value = {
+    height: `${(barEl.value?.offsetHeight ?? 0) + BAR_SPACER_GAP_PX}px`,
   };
 };
 
@@ -189,6 +207,7 @@ onMounted(() => {
   syncBarStyle();
   resizeObserver = new ResizeObserver(onViewportChange);
   resizeObserver.observe(panelEl);
+  if (barEl.value) resizeObserver.observe(barEl.value);
   window.addEventListener('resize', onViewportChange);
 });
 
@@ -210,6 +229,7 @@ const scrollToArchive = (): void => {
   <div ref="rootEl" class="space-y-3">
     <!-- 悬浮速记条：fixed 贴住详情面板底部，打开详情即可随手记 -->
     <div
+      ref="barEl"
       class="rounded-card border border-flat-weak bg-surface px-2.5 py-2"
       :style="{ ...barStyle, boxShadow: '0 4px 16px rgba(0, 0, 0, 0.18)' }"
     >
@@ -269,5 +289,8 @@ const scrollToArchive = (): void => {
         </li>
       </ul>
     </div>
+
+    <!-- 垫高占位：与悬浮速记条等高，滚到底时归档列表不被输入条遮挡 -->
+    <div :style="spacerStyle" aria-hidden="true"></div>
   </div>
 </template>
