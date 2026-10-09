@@ -4,34 +4,43 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-package%20manager-orange)](https://pnpm.io/)
 
-**WHF 股票看板**官方插件的源码与安装包仓库 —— 面向使用 [WHF 股票看板](https://github.com/WHF293/whf-stock-board) 的用户，以及想改插件、提插件的贡献者。
+**WHF 股票看板**官方插件的源码仓库（安装包在 GitHub Release）—— 面向使用 [WHF 股票看板](https://github.com/WHF293/whf-stock-board) 的用户，以及想改插件、提插件的贡献者。
 
 <!-- screenshot: repo-overview -->
 > 📷 *截图：仓库总览 —— 应用内已安装的官方插件一览*
 
 ## 这是什么
 
-这是 **[WHF 股票看板](https://github.com/WHF293/whf-stock-board)**（一款桌面股票看板应用）的官方插件仓库，收录 4 个官方插件的完整源码、清单（`manifest.json`）与可安装的安装包（`.zip`）。
+这是 **[WHF 股票看板](https://github.com/WHF293/whf-stock-board)**（一款桌面股票看板应用）的官方插件仓库，收录 4 个官方插件的完整源码与清单（`manifest.json`）；可安装的 zip 安装包由 GitHub Release 分发。
 
-WHF 股票看板本身只保留插件内核与开放能力（贡献点、`ctx.*` 服务，以及应用提供给插件的宿主服务），**插件源码与安装包都收在这个仓库里**。也就是说，插件不是塞进应用源码里的，而是像浏览器扩展一样独立分发：应用内「插件工坊」（应用内的插件管理入口）导入一个 zip，插件就用起来了，也能一键卸载。
+WHF 股票看板本身只保留插件内核与开放能力（贡献点、`ctx.*` 服务，以及应用提供给插件的宿主服务），**插件源码收在这个仓库里，安装包则由 GitHub Release 分发**（打 tag 或手动触发时由 CI 现打现传）。也就是说，插件不是塞进应用源码里的，而是像浏览器扩展一样独立分发：应用内「插件工坊」（应用内的插件管理入口）导入一个 zip，插件就用起来了，也能一键卸载。
 
 ## 插件清单
 
-| 插件 id | 名称 | 版本 | 说明 | 直达 |
-| --- | --- | --- | --- | --- |
-| `dsh-mainline` | 股票主线 | 1.0.0 | 板块抱团主线四阶段（萌芽 / 确认 / 狂热 / 瓦解）判定，只给阶段与风险提示 | [说明](./plugins/dsh-mainline/README.md) |
-| `dsh-dividend-screen` | 股息筛选 | 1.0.0 | 按股息率 / 分红连续性筛样本，叠加今年推算股息率，表格列可配置 | [说明](./plugins/dsh-dividend-screen/README.md) |
-| `dsh-quick-note` | 速记 | 1.1.0 | 侧栏抽屉随手记，可关联个股；对外提供 `note:repo` 服务 | [说明](./plugins/dsh-quick-note/README.md) |
-| `dsh-sidebar-watch` | 自选盯盘 | 1.4.0 | 顶栏轮播 + 到价 / 涨跌幅提醒，候选池与盯盘引擎可被其他插件复用 | [说明](./plugins/dsh-sidebar-watch/README.md) |
-| `dsh-watch-widget` | 任务栏盯盘小组件 | 1.0.0 | Windows 任务栏上方置顶迷你条，轮询复用自选盯盘引擎；依赖 `dsh-sidebar-watch ≥ 1.4.0` | [说明](./plugins/dsh-watch-widget/README.md) |
+当前版本与更新内容以 [Release 页面](https://github.com/jx62257070/tauri-plugin/releases) 为准（插件源码里的 `manifest.json` 是版本的事实源，README 不重复维护版本号）。
+
+| 插件 id | 名称 | 说明 | 说明文档 |
+| --- | --- | --- | --- |
+| `dsh-mainline` | 股票主线 | 板块抱团主线四阶段（萌芽 / 确认 / 狂热 / 瓦解）判定，只给阶段与风险提示 | [说明](./plugins/dsh-mainline/README.md) |
+| `dsh-dividend-screen` | 股息筛选 | 按股息率 / 分红连续性筛样本，叠加今年推算股息率，表格列可配置 | [说明](./plugins/dsh-dividend-screen/README.md) |
+| `dsh-quick-note` | 速记 | 侧栏抽屉随手记，可关联个股；对外提供 `note:repo` 服务 | [说明](./plugins/dsh-quick-note/README.md) |
+| `dsh-sidebar-watch` | 自选盯盘 | 顶栏轮播 + 到价 / 涨跌幅提醒，候选池与盯盘引擎可被其他插件复用；含任务栏小组件（可选，默认开启） | [说明](./plugins/dsh-sidebar-watch/README.md) |
+| `dsh-stock-screener` | 选股器 | 基础筛选（条件筛选 + MA 金叉回测）、信号扫描（股票池 × 八种技术信号）、尾盘选股（分时强度精筛）；自宿主 v3.3.0 起由内置页迁移为插件 | [说明](./plugins/dsh-stock-screener/README.md) |
 
 ## 安装方式
 
 前置：已安装 **WHF 股票看板**。
 
-1. 打开应用，进入「插件工坊」（应用内的插件管理入口）；
-2. 选择「导入插件」，选中 `plugins-dist/` 下对应插件的 zip，例如 `plugins-dist/dsh-quick-note-1.1.0.zip`；
-3. 导入后启用，插件入口立即出现在应用里（菜单 / 顶栏 / 侧栏 / 个股详情等，各插件位置见其说明）。
+**从 Release 下载（正式渠道）：**
+
+1. 打开 [Release 页面](https://github.com/jx62257070/tauri-plugin/releases)，挑你要的插件；
+2. **每个插件一个 zip**，按需下载即可，不必全下（文件名形如 `dsh-quick-note-<版本>.zip`）；
+3. 打开应用，进入「插件工坊」（应用内的插件管理入口），选择「导入插件」，选中刚下载的 zip；
+4. 导入后启用，插件入口立即出现在应用里（菜单 / 顶栏 / 侧栏 / 个股详情等，各插件位置见其说明）。
+
+Release 说明里列着每个插件的版本、一句话说明、安装包文件名与体积，照着挑就行。
+
+**用本地构建产物：** 也可以导入 `plugins-dist/` 下对应插件的 zip（例如 `plugins-dist/dsh-quick-note-<版本>.zip`）—— 那是 `pnpm build` 出来的**本地构建产物**，正式分发走上面的 Release 资产。
 
 卸载：在「插件工坊」里对该插件点卸载。卸载时应用会询问是否一并删除该插件的本地数据表，选「保留」则下次重新安装仍能看到历史数据。
 
@@ -43,9 +52,10 @@ tauri-plugin/
 ├─ host/                  类型快照目录：从 WHF 股票看板同步的类型与常量（自动生成，勿手改）
 ├─ scripts/
 │  ├─ build-plugins.mjs        打包流水线：源码 → 单文件 ESM → zip 安装包
+│  ├─ release-notes.mjs        生成 Release 说明正文（版本 / 体积 / 文件名都从清单与产物读出）
 │  ├─ sync-host-contract.mjs   从 WHF 股票看板同步类型快照
 │  └─ lib/plugin-classes.mjs   安装包用到的 Tailwind 类 → 样式类白名单
-└─ plugins-dist/          安装包 zip（已入库，插件工坊里导入的就是它）
+└─ plugins-dist/          本地构建产物（不入库）；正式安装包从 GitHub Release 下载
 ```
 
 ## 构建与开发
@@ -71,8 +81,23 @@ pnpm sync:host
 | `pnpm build:mainline` / `build:dividend` / `build:note` / `build:watch` | 只打对应插件 |
 | `pnpm sync:host` | 从 WHF 股票看板同步类型快照到 `host/` |
 | `pnpm typecheck` | 类型检查（连 `host/` 的类型快照一起查） |
+| `pnpm lint --max-warnings=0` | 代码规范检查（`plugins/` 与 `scripts/`） |
+| `pnpm lint:fix` | 同上，并自动修复可修项 |
 
 `--host` 可以省略（默认就是 `../whf-stock-board`，也可用环境变量 `WHF_HOST_APP` 指定）；省略时打包照常，只是不回写样式类白名单。
+
+### 发版本（Release）
+
+Release 由 GitHub Actions（`.github/workflows/release.yml`）自动发，**不用人手在网页上拖 zip**：
+
+| 触发方式 | 怎么用 | 标签从哪来 |
+| --- | --- | --- |
+| 推送 `v*` 标签 | `git tag v1.0.0 && git push origin v1.0.0` | 就是推上去的那个 tag |
+| 手动触发 | 仓库 → Actions →「Release 插件安装包」→ Run workflow | 填了 tag 就用填的；留空则用 `package.json` 的 version 拼出 `v<version>` |
+
+流水线先跑 `pnpm lint --max-warnings=0` 与 `pnpm typecheck`（过不了就不发版），再打 4 个包，最后把 `plugins-dist/*.zip` 作为 Release 资产上传 —— **一个插件一个 zip，不做合集包**。
+
+版本策略是**仓库整体版本**：tag 对齐 `package.json` 的 version；各插件自己的版本（以及体积、安装包文件名）由 `scripts/release-notes.mjs` 从清单与产物读出来，写进 Release 说明的表格里。手动触发时若该 tag 的 Release 已存在，则覆盖同名资产（`gh release upload --clobber`），不升版本也能重出包。
 
 ## 设计说明
 
@@ -126,11 +151,21 @@ declare module '../../host/types/plugin.types' {
 2. 需要升版本就改 `manifest.json` 的 `version`（安装包文件名与包内清单都跟着它）；
 3. `node scripts/build-plugins.mjs <id> --host ../whf-stock-board`；
 4. 在 WHF 股票看板仓库跑一次样式审计冒烟（安装包对着应用产物 CSS 必须零缺样式）；
-5. 提交 `plugins/<id>/` 与新安装包 zip。
+5. 提交 `plugins/<id>/` 下的源码与 manifest（升版本改 `manifest.json` 的 `version`）—— 安装包不用提交，发版时由 CI 打包并上传到 Release。
 
 **提一个新插件：** 在 `plugins/<id>/` 下放好 `plugin.ts`（入口）、`manifest.json` 与 `README.md`，并把它登记进 `scripts/build-plugins.mjs` 的构建目标表。
 
-约定：保持插件 id 稳定（id 是数据表名与存储命名空间的一部分）；一个 PR 只做一件事；源码通过 `pnpm typecheck`。
+### 三套规范（口径与主 app 一致）
+
+| 规范 | 落地位置 | 说明 |
+| --- | --- | --- |
+| 代码规范 | `eslint.config.mjs` | 与主 app 同一套卡口：禁 enum、类型导入必须 `import type`、导出声明必须带 JSDoc、禁未使用变量。提交时自动跑 `pnpm lint --max-warnings=0`，告警非零即拦下 |
+| 设计规范 | [DESIGN.md](./DESIGN.md) | 主 app `DESIGN.md` 的插件侧适配版：沿用宿主设计语言，并额外约束「只能用宿主已有的 Tailwind 类名」等插件特有规则 |
+| 提交规范 | `commitlint.config.mjs` + [husky](./.husky/) | Conventional Commits，提交信息形如 `feat(dsh-quick-note): 速记支持关联股票`，scope 用插件 id |
+
+husky 钩子在 `pnpm install` 时自动装好（`prepare` 脚本）。若需临时跳过校验，用 `git commit --no-verify`——但别养成习惯。
+
+约定：保持插件 id 稳定（id 是数据表名与存储命名空间的一部分）；一个 PR 只做一件事；源码通过 `pnpm typecheck` 与 `pnpm lint --max-warnings=0`。
 
 ## 许可
 

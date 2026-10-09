@@ -1,10 +1,19 @@
 /**
- * 插件 dsh-watch-widget · 私有常量
+ * 插件 dsh-sidebar-watch · 任务栏小组件私有常量
  *
- * 窗口 label / 尺寸 / 事件名 / 显隐策略阈值全部集中于此。
- * 本插件的常量会被小组件独立入口（`src/widget/`）跨目录复用 —— 两端共享同一份
- * 事件名与路由参数是事件协议的一部分，不能各自写字面量。
+ * ⚠️ **与宿主 `src/widget/` 渲染端共享同一份事实源**：窗口 label / URL / 尺寸 / 事件名
+ * 写岔任何一边，窗口都会**静默失联**（Tauri 建窗不会因 404 失败，只会浮出一块白窗）。
+ * 改这里必须同步改宿主渲染端那一份 —— 这是事件协议的一部分，不是实现细节。
+ *
+ * 为什么**内化**到插件目录而不是继续引用 `host/` 快照：`pnpm sync:host` 默认从主 app
+ * **本地工作树**取快照，而工作树常停在未合入小组件渲染端的 dev 分支（如 dev-csj-20260916），
+ * 一跑就会把 `host/` 里那三份 watch-widget 文件删掉。依赖它们等于把房子盖在随时会塌的
+ * 地基上，所以字面量内化到这里、一个字跟着宿主走；契约以主 app **main 分支**为准，
+ * 核对方式：`git archive <main 的 sha> src -o 快照.tar` 解到临时目录后
+ * `node scripts/sync-host-contract.mjs --host <临时目录>`（不要直接拿 dev 工作树跑）。
  */
+
+// ---------- 窗口 ----------
 
 /** 盯盘条窗口 label（capabilities 按此授权；全局唯一） */
 export const WATCH_WIDGET_WINDOW_LABEL = 'watch-widget';
@@ -65,17 +74,17 @@ export const WATCH_WIDGET_POPOVER_HEATMAP_TOP_N = 10;
 /**
  * 气泡大盘视图的等效行数（高度计算口径：总高 = 头部 40 + 10×34 + 底部 6 = 386）
  *
- * 大盘视图展示市场总览同款 10 个指数行（A 股 4 + 海外 6，见
- * `fetchWidgetIndexQuotes`），高度同样与候选行数解耦。海外指数走东财 ulist，
- * 上游通道异常时缺失即缺行——窗口高度按满行 10 钳制，缺行时气泡底部留白。
+ * 大盘视图展示市场总览同款 10 个指数行（A 股 4 + 海外 6，见宿主 `fetchWidgetIndexQuotes`），
+ * 高度同样与候选行数解耦。海外指数走东财 ulist，上游通道异常时缺失即缺行——
+ * 窗口高度按满行 10 钳制，缺行时气泡底部留白。
  */
 export const WATCH_WIDGET_POPOVER_MARKET_ROWS = 10;
 
 /**
- * 气泡内容视图（禁 enum：const 对象 + types/watch-widget.types.ts 派生类型）
+ * 气泡内容视图（禁 enum：const 对象 + widget/types.ts 派生类型）
  *
  * list = 候选列表（默认）；heatmap = 板块热力（市场总览「板块热力」迷你版，
- * 仅展示无交互）；market = 大盘走势（市场总览同款 10 指数行情）。
+ * 仅展示无交互）；market = 大盘走势（上证 / 深证 / 创业板指 / 恒生四指数行情）。
  * 视图状态归渲染端持有，切换时经 popover-view 事件上报主窗口；头部图标按
  * list → heatmap → market 循环切换。
  */
@@ -83,7 +92,7 @@ export const WATCH_WIDGET_POPOVER_VIEW = {
   LIST: 'list',
   HEATMAP: 'heatmap',
   MARKET: 'market',
-} as const;
+} as const satisfies Record<string, string>;
 
 /** 气泡与条的间距（逻辑像素） */
 export const WATCH_WIDGET_POPOVER_GAP = 6;
@@ -124,7 +133,7 @@ export const WATCH_WIDGET_EVENTS = {
   POPOVER_VIEW: 'watch-widget://popover-view',
   /** 主窗口 → 气泡：板块热力快照（Top N，市场总览板块热力同口径；拉取成功才推送） */
   HEATMAP: 'watch-widget://heatmap',
-  /** 主窗口 → 气泡：大盘指数快照（上证 / 深证 / 创业板指 / 恒生；拉取成功才推送） */
+  /** 主窗口 → 气泡：大盘指数快照（市场总览同款 10 指数，缺行即缺行；拉取成功才推送） */
   INDEXES: 'watch-widget://indexes',
   /** 盯盘条 → 主窗口：条被拖动（实时携带物理坐标；主窗口负责气泡跟随与落点记忆） */
   BAR_MOVED: 'watch-widget://bar-moved',
@@ -136,4 +145,96 @@ export const WATCH_WIDGET_EVENTS = {
    * 主题跟随必须走与行情数据同一条已验证的事件通道。
    */
   THEME: 'watch-widget://theme',
+  /** 气泡 → 主窗口：设置某只候选的分类颜色（主窗口持久化后随 lines 重新下发） */
+  SET_COLOR: 'watch-widget://set-color',
 } as const satisfies Record<string, string>;
+
+// ---------- 股票分类颜色（与宿主渲染端共享同一份事实源，改一边必须同步另一边） ----------
+
+/**
+ * 候选分类颜色取值（行首圆点，用于区分持仓 / 关注 / 其他）
+ *
+ * 存储与事件载荷里落的是**色名键**而非色值：色值只归渲染端映射，
+ * 将来调色不用迁移存量数据。取值字符串一个字都不能改（落了用户的 storage）。
+ */
+export const WATCH_WIDGET_COLOR = {
+  WHITE: 'white',
+  RED: 'red',
+  ORANGE: 'orange',
+  YELLOW: 'yellow',
+  BLUE: 'blue',
+  GREEN: 'green',
+  PURPLE: 'purple',
+  PINK: 'pink',
+} as const satisfies Record<string, string>;
+
+/** 分类颜色类型 */
+export type WatchWidgetColor = (typeof WATCH_WIDGET_COLOR)[keyof typeof WATCH_WIDGET_COLOR];
+
+/** 默认颜色：白色（未设置过分类的候选、以及取消盯盘后重新加入的候选都回落到它） */
+export const WATCH_WIDGET_COLOR_DEFAULT: WatchWidgetColor = WATCH_WIDGET_COLOR.WHITE;
+
+/** 色名 → 色值映射（渲染端圆点填充用；白色在浅色主题下靠描边辨识） */
+export const WATCH_WIDGET_COLOR_HEX: Record<WatchWidgetColor, string> = {
+  white: '#ffffff',
+  red: '#ef4444',
+  orange: '#f97316',
+  yellow: '#eab308',
+  blue: '#3b82f6',
+  green: '#22c55e',
+  purple: '#a855f7',
+  pink: '#ec4899',
+};
+
+/** 点击圆点循环切换的顺序（白 → 红 → 橙 → 黄 → 蓝 → 绿 → 紫 → 粉 → 白） */
+export const WATCH_WIDGET_COLOR_CYCLE: readonly WatchWidgetColor[] = [
+  WATCH_WIDGET_COLOR.WHITE,
+  WATCH_WIDGET_COLOR.RED,
+  WATCH_WIDGET_COLOR.ORANGE,
+  WATCH_WIDGET_COLOR.YELLOW,
+  WATCH_WIDGET_COLOR.BLUE,
+  WATCH_WIDGET_COLOR.GREEN,
+  WATCH_WIDGET_COLOR.PURPLE,
+  WATCH_WIDGET_COLOR.PINK,
+];
+
+// ---------- 设置取值（会落进用户插件 storage，取值字符串一个字都不能改） ----------
+
+/** 小组件显示模式 */
+export const WATCH_WIDGET_MODE = {
+  /** 常驻显示 */
+  ALWAYS: 'always',
+  /** 鼠标离开自动隐藏（移到屏幕右下角热区唤回） */
+  HOVER: 'hover',
+} as const satisfies Record<string, string>;
+
+/** 小组件显示模式类型 */
+export type WatchWidgetMode = (typeof WATCH_WIDGET_MODE)[keyof typeof WATCH_WIDGET_MODE];
+
+/** 小组件三态电源（条是否出现；条出现后的行为由 WATCH_WIDGET_MODE 决定，二者正交） */
+export const WATCH_WIDGET_POWER = {
+  /** 关闭：不显示迷你条 */
+  OFF: 'off',
+  /** 常驻：始终显示迷你条（原「开启」） */
+  ALWAYS: 'always',
+  /** 智能开启：仅交易日盘中显示（盘前、盘后、非交易日自动隐藏） */
+  SMART: 'smart',
+} as const satisfies Record<string, string>;
+
+/** 小组件三态电源类型 */
+export type WatchWidgetPower = (typeof WATCH_WIDGET_POWER)[keyof typeof WATCH_WIDGET_POWER];
+
+/**
+ * 三态电源默认值：**安装即开启（常驻）**
+ *
+ * 宿主服务时代的默认值是 `OFF`（那时开关在宿主设置页，宿主不内置渲染端，默认弹窗必然是白窗）。
+ * 合并进本插件后按产品要求改为**安装即开启**：小组件是这次合并的主要卖点，
+ * 默认关等于绝大多数用户永远发现不了它；用户在插件设置里随时可以关掉。
+ */
+export const WATCH_WIDGET_POWER_DEFAULT: WatchWidgetPower = WATCH_WIDGET_POWER.ALWAYS;
+
+/** 显示模式默认值：常驻显示（首次开启先让用户看到，摸鱼隐藏模式由用户显式选择） */
+export const WATCH_WIDGET_MODE_DEFAULT: WatchWidgetMode = WATCH_WIDGET_MODE.ALWAYS;
+
+/** 鼠标离开多少秒后自动隐藏（默认 3 秒） */
+export const WATCH_WIDGET_HIDE_DELAY_SEC_DEFAULT = 3;
