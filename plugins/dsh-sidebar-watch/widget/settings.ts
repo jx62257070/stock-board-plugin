@@ -10,12 +10,14 @@
  */
 import { PLUGIN_STATUS } from '../../../host/constants/plugin.constants';
 import {
+  WATCH_WIDGET_COLOR,
   WATCH_WIDGET_HIDE_DELAY_SEC_DEFAULT,
   WATCH_WIDGET_MODE,
   WATCH_WIDGET_MODE_DEFAULT,
   WATCH_WIDGET_POWER,
   WATCH_WIDGET_POWER_DEFAULT,
 } from './constants';
+import type { WatchWidgetColor } from './constants';
 import type {
   PluginRuntimeReader,
   PluginSettingsDeclaration,
@@ -35,6 +37,8 @@ export const WIDGET_SETTING_KEYS = {
   HIDE_DELAY_SEC: 'widgetHideDelaySec',
   /** 拖动落点：**不出现在表单里**，由插件自行 set 回写（宿主没有坐标控件） */
   POSITION: 'widgetPosition',
+  /** 候选分类颜色映射（symbol → 色名）：不出现在表单里，由气泡圆点交互回写 */
+  STOCK_COLORS: 'widgetStockColors',
 } as const;
 
 /** 隐藏延时的合法区间（同时给宿主表单 min/max 与读取端兜底 clamp） */
@@ -168,6 +172,46 @@ export const readWidgetConfig = (settings: PluginSettingsStore): WatchWidgetConf
     hideDelaySec: clampDelay(delay),
     position: isWidgetPosition(position) ? position : null,
   };
+};
+
+/**
+ * 色名取值是否合法（存储里可能躺着老版本或手改的脏值，未知色名一律回落白色）
+ * @param value 存储里的原始值
+ * @returns 是否为合法色名
+ */
+export const isWidgetColor = (value: unknown): value is WatchWidgetColor =>
+  (Object.values(WATCH_WIDGET_COLOR) as string[]).includes(value as string);
+
+/**
+ * 读候选分类颜色映射（symbol → 色名）
+ *
+ * 存储形态是普通对象；脏条目（色名不合法）直接丢弃而不是回落 ——
+ * 回落白色等价于「没设过」，丢弃后映射更干净，下次全量回写也不会把脏值带回库。
+ * @param settings 插件设置存取句柄
+ * @returns 归一化后的颜色映射（无有效条目时为空对象）
+ */
+export const readStockColors = (
+  settings: PluginSettingsStore,
+): Record<string, WatchWidgetColor> => {
+  const raw = settings.get<unknown>(WIDGET_SETTING_KEYS.STOCK_COLORS, null);
+  if (typeof raw !== 'object' || raw === null) return {};
+  const result: Record<string, WatchWidgetColor> = {};
+  for (const [symbol, color] of Object.entries(raw as Record<string, unknown>)) {
+    if (symbol && isWidgetColor(color)) result[symbol] = color;
+  }
+  return result;
+};
+
+/**
+ * 全量回写候选分类颜色映射（调用方先改自己的 reactive 副本，再整表落库）
+ * @param settings 插件设置存取句柄
+ * @param colors 回写后的完整映射
+ */
+export const rememberStockColors = (
+  settings: PluginSettingsStore,
+  colors: Readonly<Record<string, WatchWidgetColor>>,
+): void => {
+  settings.set(WIDGET_SETTING_KEYS.STOCK_COLORS, colors);
 };
 
 /**

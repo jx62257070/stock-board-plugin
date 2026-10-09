@@ -14,7 +14,7 @@
  * 的全部贡献点（顶栏盯盘主体一并消失）。小组件只能缺席，不能同归于尽 ——
  * 所有分支都以 return 收尾，async 动作统一走 `safe()`，最后一丝意外交给调用方的 try/catch。
  */
-import { computed, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { isTauri } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { cursorPosition } from '@tauri-apps/api/window';
@@ -42,9 +42,12 @@ import {
 } from './constants';
 import {
   LEGACY_WATCH_WIDGET_PLUGIN_ID,
+  isWidgetColor,
   legacyWidgetInstalled,
+  readStockColors,
   readWidgetConfig,
   rememberBarPosition,
+  rememberStockColors,
 } from './settings';
 import { buildWatchContextList, buildWatchWidgetRows } from './presenter';
 import {
@@ -58,6 +61,8 @@ import {
   type PhysicalRect,
 } from './windows';
 import type {
+  WatchWidgetColor,
+  WatchWidgetColorPayload,
   WatchWidgetHeatmapBoard,
   WatchWidgetIndexRow,
   WatchWidgetMountOptions,
@@ -148,9 +153,27 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
     filterCandidatesByWatchlist(repo.list(), watchlist.symbols()),
   );
 
+  /**
+   * 候选分类颜色映射（symbol → 色名；挂载时从插件 storage 水合）
+   *
+   * 持 reactive 副本而不是每次从 settings 现读：set-color 高频改写时
+   * 行载荷要立刻跟着变，且 settings 容器的响应式口径是宿主表单的内部约定，
+   * 不给「自定义键是否响应式」留赌注。
+   */
+  const colorBySymbol = ref<Record<string, WatchWidgetColor>>(readStockColors(settings));
+
+  /**
+   * 全量改写颜色映射：先改 reactive 副本（行载荷随之重算推送），再整表落库
+   * @param next 改写后的完整映射
+   */
+  const applyStockColors = (next: Record<string, WatchWidgetColor>): void => {
+    colorBySymbol.value = next;
+    rememberStockColors(settings, next);
+  };
+
   /** 推送给小组件窗口的展示行（引擎报价一变即重算） */
   const rows = computed(() =>
-    buildWatchWidgetRows(candidates.value, monitor.quotes.value, format),
+    buildWatchWidgetRows(candidates.value, monitor.quotes.value, format, colorBySymbol.value),
   );
 
   // ---------- 窗口句柄与显隐状态（仅主窗口侧持有） ----------
@@ -566,6 +589,34 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
       await listen<{ symbol: string }>(WATCH_WIDGET_EVENTS.OPEN_STOCK, (event) => {
         openStockInMain(event.payload.symbol);
       }),
+    );
+    // 气泡里点圆点换分类颜色：校验后改写映射（reactive 副本 + 落库），
+    // 行载荷随副本重算，现有 watch(rows, pushLines) 会自动把新颜色推回条 / 气泡
+    unlistens.push(
+      await listen<WatchWidgetColorPayload>(WATCH_WIDGET_EVENTS.SET_COLOR, (event) => {
+        const { symbol, color } = event.payload ?? {};
+        if (!symbol || !isWidgetColor(color)) return;
+        if (colorBySymbol.value[symbol] === color) return;
+        applyStockColors({ ...colorBySymbol.value, [symbol]: color });
+      }),
+    );
+
+    // ---------- 取消盯盘 → 清除该候选的颜色记忆 ----------
+    // 监听的是候选池本体（repo.list）而不是过滤后的 candidates：从自选股移除
+    // （候选还在池里）不算「取消盯盘」，颜色要保留 —— 用户说的规则是只有把股票
+    // 从盯盘里移出，下次再加回来才回落白色。
+    effect(() =>
+      watch(
+        () => repo.list().map((item) => item.symbol),
+        (symbols) => {
+          const live = new Set(symbols);
+          const current = colorBySymbol.value;
+          const kept = Object.entries(current).filter(([symbol]) => live.has(symbol));
+          if (kept.length === Object.keys(current).length) return;
+          applyStockColors(Object.fromEntries(kept));
+        },
+        { immediate: true },
+      ),
     );
 
     // ---------- 摸鱼显隐（hover 模式：离开超时隐藏，角落热区唤回） ----------

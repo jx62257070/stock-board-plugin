@@ -21,7 +21,10 @@ import type {
 } from '../../../host/types/plugin.types';
 import type { NotifyService } from '../../../host/types/notify.types';
 import type { WATCH_WIDGET_POPOVER_VIEW } from './constants';
-import type { WatchWidgetMode, WatchWidgetPower } from './constants';
+import type { WatchWidgetColor, WatchWidgetMode, WatchWidgetPower } from './constants';
+
+/** 分类颜色类型（消费方统一从本文件取，事实源在 ./constants） */
+export type { WatchWidgetColor };
 import type { WatchMonitor } from '../monitor';
 import type { WatchCandidateRepo } from '../service';
 
@@ -43,6 +46,16 @@ export interface WatchWidgetRow {
   tone: HeaderMarqueeTone;
   /** 阈值已触发待回差（行首提示点） */
   fired: boolean;
+  /** 分类颜色（行首圆点；主窗口按持久化的 symbol → 颜色映射补齐，未设置时为白色） */
+  color: WatchWidgetColor;
+}
+
+/** `set-color` 事件载荷（气泡 → 主窗口：设置候选的分类颜色） */
+export interface WatchWidgetColorPayload {
+  /** 完整符号（sh600519） */
+  symbol: string;
+  /** 设置后的颜色（必须是 WATCH_WIDGET_COLOR 的合法取值，主窗口侧会再校验一次） */
+  color: WatchWidgetColor;
 }
 
 /** 热力视图单板块 */

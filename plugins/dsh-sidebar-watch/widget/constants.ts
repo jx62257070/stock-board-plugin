@@ -145,7 +145,58 @@ export const WATCH_WIDGET_EVENTS = {
    * 主题跟随必须走与行情数据同一条已验证的事件通道。
    */
   THEME: 'watch-widget://theme',
+  /** 气泡 → 主窗口：设置某只候选的分类颜色（主窗口持久化后随 lines 重新下发） */
+  SET_COLOR: 'watch-widget://set-color',
 } as const satisfies Record<string, string>;
+
+// ---------- 股票分类颜色（与宿主渲染端共享同一份事实源，改一边必须同步另一边） ----------
+
+/**
+ * 候选分类颜色取值（行首圆点，用于区分持仓 / 关注 / 其他）
+ *
+ * 存储与事件载荷里落的是**色名键**而非色值：色值只归渲染端映射，
+ * 将来调色不用迁移存量数据。取值字符串一个字都不能改（落了用户的 storage）。
+ */
+export const WATCH_WIDGET_COLOR = {
+  WHITE: 'white',
+  RED: 'red',
+  ORANGE: 'orange',
+  YELLOW: 'yellow',
+  BLUE: 'blue',
+  GREEN: 'green',
+  PURPLE: 'purple',
+  PINK: 'pink',
+} as const satisfies Record<string, string>;
+
+/** 分类颜色类型 */
+export type WatchWidgetColor = (typeof WATCH_WIDGET_COLOR)[keyof typeof WATCH_WIDGET_COLOR];
+
+/** 默认颜色：白色（未设置过分类的候选、以及取消盯盘后重新加入的候选都回落到它） */
+export const WATCH_WIDGET_COLOR_DEFAULT: WatchWidgetColor = WATCH_WIDGET_COLOR.WHITE;
+
+/** 色名 → 色值映射（渲染端圆点填充用；白色在浅色主题下靠描边辨识） */
+export const WATCH_WIDGET_COLOR_HEX: Record<WatchWidgetColor, string> = {
+  white: '#ffffff',
+  red: '#ef4444',
+  orange: '#f97316',
+  yellow: '#eab308',
+  blue: '#3b82f6',
+  green: '#22c55e',
+  purple: '#a855f7',
+  pink: '#ec4899',
+};
+
+/** 点击圆点循环切换的顺序（白 → 红 → 橙 → 黄 → 蓝 → 绿 → 紫 → 粉 → 白） */
+export const WATCH_WIDGET_COLOR_CYCLE: readonly WatchWidgetColor[] = [
+  WATCH_WIDGET_COLOR.WHITE,
+  WATCH_WIDGET_COLOR.RED,
+  WATCH_WIDGET_COLOR.ORANGE,
+  WATCH_WIDGET_COLOR.YELLOW,
+  WATCH_WIDGET_COLOR.BLUE,
+  WATCH_WIDGET_COLOR.GREEN,
+  WATCH_WIDGET_COLOR.PURPLE,
+  WATCH_WIDGET_COLOR.PINK,
+];
 
 // ---------- 设置取值（会落进用户插件 storage，取值字符串一个字都不能改） ----------
 
