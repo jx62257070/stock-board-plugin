@@ -213,14 +213,27 @@ export const USER_PLUGIN_PACKAGE_ACCEPT = '.zip,application/zip,application/x-zi
 /**
  * 用户插件的安装来源（只做展示与统计，不参与启停判定）
  *
- * `zip` = 第三方打包产物；`code` = 粘贴 / 选择单文件 JS。
+ * `zip` = 第三方打包产物；`code` = 粘贴 / 选择单文件 JS；
+ * `update` = 在线更新（远程 zip 直链下载后走同一条安装链路）。
  */
 export const USER_PLUGIN_SOURCE = {
   /** 导入 zip 产物包 */
   PACKAGE: 'zip',
   /** 粘贴或选择单文件 JS */
   CODE: 'code',
+  /** 在线更新（来自官方插件仓库的更新清单） */
+  UPDATE: 'update',
 } as const;
+
+/** 安装来源 → 中文文案（插件工坊列表项展示） */
+export const USER_PLUGIN_SOURCE_LABEL: Record<
+  (typeof USER_PLUGIN_SOURCE)[keyof typeof USER_PLUGIN_SOURCE],
+  string
+> = {
+  [USER_PLUGIN_SOURCE.PACKAGE]: 'zip 包安装',
+  [USER_PLUGIN_SOURCE.CODE]: '粘贴代码安装',
+  [USER_PLUGIN_SOURCE.UPDATE]: '在线更新安装',
+};
 
 /** 用户插件代码动态 import 时的 Blob MIME（ESM 模块） */
 export const USER_PLUGIN_BLOB_MIME = 'text/javascript';
@@ -261,3 +274,238 @@ export const PLUGIN_VANISHED_NOTICE_BODY = (
   pageTitle: string,
   targetTitle: string,
 ): string => `页面「${pageTitle || '当前页'}」已撤销，已转到「${targetTitle}」`;
+
+/**
+ * 用户插件包**入队后**的运行状态
+ *
+ * 一条流水线只有两个终态：`installed`（已落内核）与 `failed` / `conflict`（被拦下）。
+ * `ready` 是「解析全过、等着被安装」的暂停态 —— 用户此时可以移除、单装或批量装。
+ */
+export const USER_PLUGIN_INTAKE_STATUS = {
+  /** 解析流水线推进中 */
+  PARSING: 'parsing',
+  /** 解析完成且无冲突，等待安装 */
+  READY: 'ready',
+  /** 与同批次更早上传的包插件 id 撞车，被仲裁拦下 */
+  CONFLICT: 'conflict',
+  /** 解析失败（解包 / 预检 / 加载 / 校验 / 清单任一环节报错） */
+  FAILED: 'failed',
+  /** 正在写入持久化并挂载内核 */
+  INSTALLING: 'installing',
+  /** 已安装 */
+  INSTALLED: 'installed',
+} as const satisfies Record<string, string>;
+
+/** 入队任务的运行状态 */
+export type UserPluginIntakeStatus =
+  (typeof USER_PLUGIN_INTAKE_STATUS)[keyof typeof USER_PLUGIN_INTAKE_STATUS];
+
+/** 入队任务状态中文文案 */
+export const USER_PLUGIN_INTAKE_STATUS_LABEL: Record<UserPluginIntakeStatus, string> = {
+  [USER_PLUGIN_INTAKE_STATUS.PARSING]: '解析中',
+  [USER_PLUGIN_INTAKE_STATUS.READY]: '待安装',
+  [USER_PLUGIN_INTAKE_STATUS.CONFLICT]: '包间冲突',
+  [USER_PLUGIN_INTAKE_STATUS.FAILED]: '解析失败',
+  [USER_PLUGIN_INTAKE_STATUS.INSTALLING]: '安装中',
+  [USER_PLUGIN_INTAKE_STATUS.INSTALLED]: '已安装',
+};
+
+/** 入队任务状态标签色调（BaseTag tone；失败用 up=红，其余不走涨跌语义） */
+export const USER_PLUGIN_INTAKE_STATUS_TONE: Record<
+  UserPluginIntakeStatus,
+  'primary' | 'up' | 'down' | 'flat'
+> = {
+  [USER_PLUGIN_INTAKE_STATUS.PARSING]: 'flat',
+  [USER_PLUGIN_INTAKE_STATUS.READY]: 'primary',
+  [USER_PLUGIN_INTAKE_STATUS.CONFLICT]: 'primary',
+  [USER_PLUGIN_INTAKE_STATUS.FAILED]: 'up',
+  [USER_PLUGIN_INTAKE_STATUS.INSTALLING]: 'flat',
+  [USER_PLUGIN_INTAKE_STATUS.INSTALLED]: 'down',
+};
+
+/**
+ * 插件包入队的六步流水线（**数组顺序即执行顺序**，UI 直接照此渲染进度条）
+ *
+ * 拆成六步是为了让「卡在哪一步」可见：以前整条链路缩在一次 `解析预览` 里，
+ * 失败时只有一句最终结果，用户无从判断是包坏了、产物写错了还是清单对不上。
+ */
+export const USER_PLUGIN_INTAKE_STEPS = [
+  { key: 'unzip', label: '解包' },
+  { key: 'lint', label: '静态预检' },
+  { key: 'import', label: '加载产物' },
+  { key: 'validate', label: '结构校验' },
+  { key: 'manifest', label: '清单比对' },
+  { key: 'conflict', label: '冲突检测' },
+] as const satisfies readonly { key: string; label: string }[];
+
+/** 流水线步骤 key */
+export type UserPluginIntakeStepKey = (typeof USER_PLUGIN_INTAKE_STEPS)[number]['key'];
+
+/** 流水线步骤状态（失败步骤之后的未执行步骤一律 `skipped`，不再假装会跑） */
+export const USER_PLUGIN_INTAKE_STEP_STATE = {
+  /** 尚未执行 */
+  PENDING: 'pending',
+  /** 执行中 */
+  RUNNING: 'running',
+  /** 通过 */
+  DONE: 'done',
+  /** 失败（流水线在此终止） */
+  FAILED: 'failed',
+  /** 因前序失败而未执行 */
+  SKIPPED: 'skipped',
+} as const satisfies Record<string, string>;
+
+/** 流水线步骤状态 */
+export type UserPluginIntakeStepState =
+  (typeof USER_PLUGIN_INTAKE_STEP_STATE)[keyof typeof USER_PLUGIN_INTAKE_STEP_STATE];
+
+/** 步骤状态 → 进度条里的标记符号 */
+export const USER_PLUGIN_INTAKE_STEP_MARK: Record<UserPluginIntakeStepState, string> = {
+  [USER_PLUGIN_INTAKE_STEP_STATE.PENDING]: '·',
+  [USER_PLUGIN_INTAKE_STEP_STATE.RUNNING]: '…',
+  [USER_PLUGIN_INTAKE_STEP_STATE.DONE]: '✓',
+  [USER_PLUGIN_INTAKE_STEP_STATE.FAILED]: '✕',
+  [USER_PLUGIN_INTAKE_STEP_STATE.SKIPPED]: '–',
+};
+
+/** 进度条里步骤序号的圈字符（按 `USER_PLUGIN_INTAKE_STEPS` 下标取） */
+export const USER_PLUGIN_INTAKE_STEP_GLYPH = ['①', '②', '③', '④', '⑤', '⑥'] as const;
+
+/** 进度条里两个步骤之间的分隔符 */
+export const USER_PLUGIN_INTAKE_STEP_SEPARATOR = ' → ';
+
+/**
+ * 同批次包间 id 冲突文案（**按上传顺序仲裁，先上传者胜出**）
+ *
+ * 同 id 撞车在本批次里只能留一个：后到的包被判冲突，由用户决定「移除前者」还是
+ * 「移除前者后单独装本包」。这与「和已装记录 / 内置插件同 id」是两回事 ——
+ * 后者是升级与接管，属合法情形，不算冲突。
+ * @param otherFileName 更早上传、抢占了该 id 的包名
+ * @param pluginId 撞车的插件 id
+ * @returns 面向用户的冲突说明
+ */
+export const USER_PLUGIN_PACKAGE_CONFLICT_MESSAGE = (
+  otherFileName: string,
+  pluginId: string,
+): string =>
+  `与更早上传的「${otherFileName}」插件 id 相同（${pluginId}），同一批次只能安装一个；`
+  + '请先移除前者，或单独安装本包';
+
+/** 入队任务 uid 前缀（仅用于列表 key 与移除定位，不参与持久化） */
+export const USER_PLUGIN_INTAKE_UID_PREFIX = 'pkg-intake-';
+
+/** 拖拽投放区提示（支持一次选多个 / 拖多个，选中即自动解析） */
+export const USER_PLUGIN_INTAKE_DROP_HINT =
+  '把 .zip 插件包拖到这里，或点击选择（可一次选多个，选中即自动解析）';
+
+/** 拖拽悬停时的投放区提示 */
+export const USER_PLUGIN_INTAKE_DROP_ACTIVE_HINT = '松开即入队，立刻开始解析';
+
+/** 队列为空时的提示（说明批量与「先传先解析」的口径） */
+export const USER_PLUGIN_INTAKE_EMPTY_TEXT =
+  '还没有插件包。支持批量上传：每个包各自独立解析，先上传的先开始，互不阻塞。';
+
+/** 冲突卡片的仲裁说明（先上传者优先） */
+export const USER_PLUGIN_INTAKE_CONFLICT_HINT =
+  '按上传顺序仲裁：先上传者优先。移除前者后本包会自动回到待安装。';
+
+/** 「移除」按钮文案 */
+export const USER_PLUGIN_INTAKE_REMOVE_LABEL = '移除';
+
+/** 单包「安装」按钮文案 */
+export const USER_PLUGIN_INTAKE_INSTALL_LABEL = '安装';
+
+/**
+ * 底部「安装全部」按钮文案（括号内为可安装数量）
+ * @param count 可安装数量
+ * @returns 按钮文案
+ */
+export const USER_PLUGIN_INTAKE_INSTALL_ALL_LABEL = (count: number): string =>
+  `安装全部（${count}）`;
+
+/** 全部安装完成后的「完成」按钮文案 */
+export const USER_PLUGIN_INTAKE_FINISH_LABEL = '完成';
+
+/** 弹窗关闭按钮文案 */
+export const USER_PLUGIN_INTAKE_CLOSE_LABEL = '关闭';
+
+/** 非致命提醒块标题（沿用「能装，但可能显示不正常」口径） */
+export const USER_PLUGIN_INTAKE_WARN_TITLE = '能装，但可能显示不正常：';
+
+/**
+ * 非致命提醒的单行文案
+ * @param line 源码行号
+ * @param message 提醒内容
+ * @returns 格式化后的一行
+ */
+export const USER_PLUGIN_INTAKE_WARN_LINE = (line: number, message: string): string =>
+  `第 ${line} 行：${message}`;
+
+/** 安装失败时的错误前缀（与解析失败区分开） */
+export const USER_PLUGIN_INTAKE_INSTALL_FAILED_PREFIX = '安装失败：';
+
+/** 卡片内 README 预览最多展示的字符数（包内文档可能很长，卡片里只给个开头） */
+export const USER_PLUGIN_README_PREVIEW_MAX = 600;
+
+/**
+ * 卡片元信息行：插件 id
+ * @param id 插件 id
+ * @returns 展示文案
+ */
+export const USER_PLUGIN_INTAKE_META_ID = (id: string): string => `id：${id}`;
+
+/**
+ * 卡片元信息行：版本
+ * @param version 版本号
+ * @returns 展示文案
+ */
+export const USER_PLUGIN_INTAKE_META_VERSION = (version: string): string => `版本：v${version}`;
+
+/**
+ * 卡片元信息行：作者（产物未声明时回退清单作者，都没有则回退缺省文案）
+ * @param author 作者
+ * @returns 展示文案
+ */
+export const USER_PLUGIN_INTAKE_META_AUTHOR = (author: string): string => `作者：${author}`;
+
+/**
+ * 卡片包信息行：入口产物路径
+ * @param entryPath 包内入口相对路径
+ * @returns 展示文案
+ */
+export const USER_PLUGIN_INTAKE_PKG_ENTRY = (entryPath: string): string => `入口：${entryPath}`;
+
+/**
+ * 卡片包信息行：包内文件数
+ * @param count 文件数
+ * @returns 展示文案
+ */
+export const USER_PLUGIN_INTAKE_PKG_FILES = (count: number): string => `包内 ${count} 个文件`;
+
+/** 卡片包信息行：含 manifest.json */
+export const USER_PLUGIN_INTAKE_PKG_HAS_MANIFEST = '含 manifest.json';
+
+/** 卡片包信息行：无 manifest.json */
+export const USER_PLUGIN_INTAKE_PKG_NO_MANIFEST = '无 manifest.json（元信息取自产物）';
+
+/**
+ * 卡片上的升级提示（同 id 已装过：同版本 = 重装，异版本 = 升级）
+ * @param previousVersion 已安装版本
+ * @param nextVersion 本次待装版本
+ * @returns 提示文案
+ */
+export const USER_PLUGIN_INTAKE_UPGRADE_HINT = (
+  previousVersion: string,
+  nextVersion: string,
+): string =>
+  previousVersion === nextVersion
+    ? `已安装 v${previousVersion}，本次将覆盖重装（插件数据表保留）`
+    : `已安装 v${previousVersion}，本次将升级到 v${nextVersion}（插件数据表保留）`;
+
+/**
+ * 卡片上的接管提示（同 id 存在内置实现）
+ * @param builtinVersion 内置版本号
+ * @returns 提示文案
+ */
+export const USER_PLUGIN_INTAKE_TAKEOVER_HINT = (builtinVersion: string): string =>
+  `内置版 v${builtinVersion} 将被本版本接管；卸载本插件即刻恢复内置实现`;

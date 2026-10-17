@@ -19,6 +19,9 @@ export const NOTIFY_TONE = {
 /** 默认自动消失时长（毫秒） */
 export const NOTIFY_DEFAULT_TIMEOUT_MS = 8_000;
 
+/** 轻提示存活时长（毫秒）：复制成功这类即时反馈，不值得占满 8s */
+export const NOTIFY_QUICK_TIMEOUT_MS = 2_000;
+
 /** 同屏最多保留的浮窗条数（超出时挤掉最旧的一条） */
 export const NOTIFY_MAX_ITEMS = 4;
 

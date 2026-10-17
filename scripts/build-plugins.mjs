@@ -66,7 +66,7 @@ const ANY_IMPORT = /^\s*import\s+(?:[^'"\n]*?\bfrom\s+)?['"]([^'"]+)['"]/gm;
  * 解析宿主仓库根目录（可缺省）
  *
  * 找到了就把「产物用到的 Tailwind 类」回写进宿主的样式白名单
- * （`src/assets/styles/plugin-classes.txt`，经 theme.css 的 `@source` 进产物 CSS）；
+ * （`src/common/assets/styles/plugin-classes.txt`，经 theme.css 的 `@source` 进产物 CSS）；
  * 找不到只是跳过这一步 —— 打包本身不依赖宿主。
  * @returns 宿主根目录；不可用时为 null
  */

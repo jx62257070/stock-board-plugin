@@ -5,7 +5,7 @@
  * 承载组件由宿主渲染在右下角（跨路由常驻，不受插件面板挂载状态影响）。
  * 语义色沿用全站涨跌 token，因此浮窗天然跟随 `data-trend` 主题。
  */
-import type { NOTIFY_TONE } from '../constants/notify.constants';
+import type { NOTIFY_TONE } from '../constants/notify.constants.ts';
 
 /** 浮窗语气（决定强调色；取值见 constants/notify.constants.ts 的 NOTIFY_TONE） */
 export type NotifyTone = (typeof NOTIFY_TONE)[keyof typeof NOTIFY_TONE];

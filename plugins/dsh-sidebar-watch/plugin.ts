@@ -57,9 +57,9 @@ const WATCH_HEADER_PANEL_KEY = `dsh-sidebar-watch#${WATCH_HEADER_ITEM_ID}`;
 export const sidebarWatchPlugin: PluginDefinition = {
   id: 'dsh-sidebar-watch',
   name: '自选盯盘',
-  version: '2.2.0',
+  version: '2.3.0',
   description:
-    '顶栏常驻盯盘入口：收起态单条轮播候选的名称 / 现价 / 涨跌幅，点开是完整清单。在自选股「操作」列点「盯盘」逐只加入候选（候选与阈值存在插件自己的数据表里），可给每只票设价格 / 涨跌幅阈值，到价在右下角弹提醒；另附「打开自选股页」全局快捷键。2.0.0 起并入原「任务栏盯盘小组件」：同一份候选与引擎，可在 Windows 任务栏上方常驻一个置顶迷你条（插件设置里开关，默认开启，仅桌面端生效）。',
+    '顶栏常驻盯盘入口：收起态单条轮播候选的名称 / 现价 / 涨跌幅，点开是完整清单（按自选分组归组，组头可展开收起）。在自选股「操作」列点「盯盘」逐只加入候选（候选与阈值存在插件自己的数据表里），可给每只票设价格 / 涨跌幅阈值，到价在右下角弹提醒；另附「打开自选股页」全局快捷键。2.0.0 起并入原「任务栏盯盘小组件」：同一份候选与引擎，可在 Windows 任务栏上方常驻一个置顶迷你条（插件设置里开关，默认开启，仅桌面端生效）。2.3.0 起气泡扩到六个视图（候选分组列表 / 板块热力 / 大盘走势 / 实时成交额 / 热点新闻 / 今天炒什么），头部 select 下拉切换。',
   author: '内置',
   // 小浮窗的开关与参数走插件自带设置（宿主渲染通用表单），不再依赖宿主服务
   settings: WIDGET_SETTINGS_SECTION,
@@ -170,6 +170,8 @@ export const sidebarWatchPlugin: PluginDefinition = {
           marketStatus: ctx.consume('app:market-status'),
           theme: ctx.consume('app:theme'),
           market: ctx.consume('app:market'),
+          // 市场资讯（成交额 / 新闻标题 / 热股榜）：缺失时三个新视图空态降级
+          marketData: ctx.consume('app:market-data'),
         },
         // ⚠️ 必须包一层箭头函数：effect / onDispose 是宿主 PluginContext 上读
         // `this.bag` 的原型方法，直接摘引用（`effect: ctx.effect`）会丢 `this`，
