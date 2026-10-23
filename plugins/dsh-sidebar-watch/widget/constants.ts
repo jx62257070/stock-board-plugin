@@ -169,6 +169,8 @@ export const WATCH_WIDGET_EVENTS = {
   THEME: 'watch-widget://theme',
   /** 气泡 → 主窗口：设置某只候选的分类颜色（主窗口持久化后随 lines 重新下发） */
   SET_COLOR: 'watch-widget://set-color',
+  /** 气泡 → 主窗口：设置 / 清除某只候选的阈值提醒（主窗口写候选仓储后随 lines 重新下发） */
+  SET_ALERT: 'watch-widget://set-alert',
 } as const satisfies Record<string, string>;
 
 // ---------- 股票分类颜色（与宿主渲染端共享同一份事实源，改一边必须同步另一边） ----------

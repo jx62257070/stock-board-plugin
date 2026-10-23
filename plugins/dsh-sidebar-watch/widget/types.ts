@@ -28,6 +28,7 @@ import type { WatchWidgetColor, WatchWidgetMode, WatchWidgetPower } from './cons
 export type { WatchWidgetColor };
 import type { WatchMonitor } from '../monitor';
 import type { WatchCandidateRepo } from '../service';
+import type { WatchAlertKind } from '../alerts';
 
 /** 气泡内容视图（list / heatmap / market / turnover / news / hotboard，见 ./constants） */
 export type WatchWidgetPopoverView =
@@ -47,6 +48,14 @@ export interface WatchWidgetRow {
   tone: HeaderMarqueeTone;
   /** 阈值已触发待回差（行首提示点） */
   fired: boolean;
+  /** 阈值类型（'' = 未设；气泡据此回显编辑器与铃铛配色） */
+  alertKind: WatchAlertKind;
+  /** 阈值方向（true = 涨到 / 涨幅达到） */
+  alertAbove: boolean;
+  /** 阈值数值（价格为元、涨跌幅为百分数；未设时 null） */
+  alertValue: number | null;
+  /** 阈值简述文案（主窗口按宿主 `app:format` 造好；未设时空串，铃铛 tooltip 用） */
+  alertText: string;
   /** 分类颜色（行首圆点；主窗口按持久化的 symbol → 颜色映射补齐，未设置时为白色） */
   color: WatchWidgetColor;
 }
@@ -57,6 +66,20 @@ export interface WatchWidgetColorPayload {
   symbol: string;
   /** 设置后的颜色（必须是 WATCH_WIDGET_COLOR 的合法取值，主窗口侧会再校验一次） */
   color: WatchWidgetColor;
+}
+
+/** `set-alert` 事件载荷（气泡 → 主窗口：设置 / 清除候选的阈值提醒） */
+export interface WatchWidgetAlertPayload {
+  /** 完整符号（sh600519；不在候选池里时主窗口忽略） */
+  symbol: string;
+  /** true = 清除该候选的阈值（忽略其余字段；缺省 = 按 kind / above / value 设置） */
+  clear?: boolean;
+  /** 阈值类型（必须是 'price' / 'change'，主窗口侧会再校验一次） */
+  kind?: WatchAlertKind;
+  /** 比较方向（true = 涨到 / 涨幅达到；缺省按 true 处理） */
+  above?: boolean;
+  /** 阈值数值（必须为正数，主窗口侧会再校验一次） */
+  value?: number | null;
 }
 
 /** 热力视图单板块 */

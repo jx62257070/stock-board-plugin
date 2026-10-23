@@ -30,7 +30,7 @@ import {
   MARKET_NEWS_SOURCE_DEFAULT,
 } from '../../../host/constants/market-data.constants';
 import { filterCandidatesByWatchlist } from '../candidates';
-import { WATCH_MARQUEE_TONE_BY_TREND } from '../constants';
+import { WATCH_ALERT_KIND, WATCH_MARQUEE_TONE_BY_TREND } from '../constants';
 import {
   WATCH_WIDGET_BAR_HEIGHT,
   WATCH_WIDGET_BAR_WIDTH,
@@ -71,6 +71,7 @@ import {
   type PhysicalRect,
 } from './windows';
 import type {
+  WatchWidgetAlertPayload,
   WatchWidgetBoardPayload,
   WatchWidgetBoardRow,
   WatchWidgetColor,
@@ -879,6 +880,26 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
         if (!symbol || !isWidgetColor(color)) return;
         if (colorBySymbol.value[symbol] === color) return;
         applyStockColors({ ...colorBySymbol.value, [symbol]: color });
+      }),
+    );
+
+    // 气泡里编辑阈值提醒：校验后写候选仓储（与顶栏盯盘面板同一份 repo，天然双向同步 ——
+    // repo 是响应式的，面板 computed 与本文件的 rows computed 都会跟着重算，
+    // watch(rows, pushLines) 随即把新阈值推回条 / 气泡）。setAlert 会把 armed 复位，
+    // 「改阈值视为重新开始」的语义与面板端 AlertEditor 完全一致。
+    unlistens.push(
+      await listen<WatchWidgetAlertPayload>(WATCH_WIDGET_EVENTS.SET_ALERT, (event) => {
+        const { symbol, clear, kind, above, value } = event.payload ?? {};
+        if (!symbol) return;
+        if (clear) {
+          repo.clearAlert(symbol);
+          return;
+        }
+        const legalKind = kind === WATCH_ALERT_KIND.PRICE || kind === WATCH_ALERT_KIND.CHANGE;
+        if (!legalKind || typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+          return;
+        }
+        repo.setAlert(symbol, { kind, above: above !== false, value });
       }),
     );
 

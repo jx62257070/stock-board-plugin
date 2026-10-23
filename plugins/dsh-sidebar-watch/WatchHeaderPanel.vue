@@ -346,16 +346,15 @@ const onOpenWatchlist = (): void => {
                 </span>
               </button>
 
-              <!-- 阈值提醒：已设阈值时铃铛按触发方向上色，一眼能看出这只票在等什么；
+              <!-- 阈值提醒：铃铛常显（未设阈值时跟随主题文字色：暗色主题白、亮色主题黑），
+                   hover 切主题色；已设阈值的按触发方向上色，一眼能看出这只票在等什么；
                    已触发过一次的加一个小点，表示要等价格回到内侧才重新生效 -->
               <button
                 type="button"
-                class="pressable relative shrink-0 rounded p-0.5 transition-opacity hover:bg-flat-weak active:scale-90"
+                class="pressable relative shrink-0 rounded p-0.5 transition-colors hover:bg-flat-weak hover:text-primary active:scale-90"
                 :class="[
-                  row.hasAlert
-                    ? row.alertClass
-                    : 'text-text-tertiary opacity-0 hover:text-text group-hover:opacity-100',
-                  editingSymbol === row.symbol ? 'bg-primary-weak text-primary opacity-100' : '',
+                  row.hasAlert ? row.alertClass : 'text-text',
+                  editingSymbol === row.symbol ? 'bg-primary-weak text-primary' : '',
                 ]"
                 :aria-label="`${row.hasAlert ? WATCH_ALERT_BUTTON_ACTIVE_TITLE : WATCH_ALERT_BUTTON_TITLE} ${row.name}`"
                 :title="row.hasAlert ? `阈值：${row.alertText}${row.fired ? '（已触发，待重新生效）' : ''}` : WATCH_ALERT_BUTTON_TITLE"

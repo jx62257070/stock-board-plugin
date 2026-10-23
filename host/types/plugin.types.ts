@@ -119,6 +119,13 @@ export interface MenuItemContribution {
   /** 排序权重，越小越靠前（默认 500，即排在宿主菜单之后） */
   order?: number;
   /**
+   * 侧栏分组 id（缺省归「插件」组，见 `SIDEBAR_MENU_GROUP_DEFAULT`）
+   *
+   * 传宿主内置组 id（`SIDEBAR_MENU_GROUP` 之一）把页面挂进对应组；
+   * 传自定义 id 时侧栏会新增一个分组（标题直接用该 id，组顺序排在末尾）。
+   */
+  group?: string;
+  /**
    * 是否声明为「插件页随插件撤销时的兜底落点」（默认 false）
    *
    * 用户正停在某个插件的页面上、而该插件被关闭 / 卸载 / 挂载失败回滚时，
@@ -139,6 +146,8 @@ export interface RegisteredMenuItem extends MenuItemContribution {
   icon: string;
   /** 排序权重（已补默认值） */
   order: number;
+  /** 侧栏分组 id（已补默认值：缺省归「插件」组） */
+  group: string;
   /** 是否为兜底落点（已补默认值：缺省 false） */
   fallbackLanding: boolean;
 }
