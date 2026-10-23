@@ -201,6 +201,11 @@ export const openBarWindow = async (
 
 /**
  * 创建气泡窗口（隐藏态创建一次复用；尺寸与位置在每次展开前按行数设定）
+ *
+ * 气泡内嵌阈值编辑器要接键盘输入：`focusable: false`（WS_EX_NOACTIVATE）的窗口
+ * 收不到正规键盘焦点，输入框看着能打字、v-model 却拿不到值（IME 组合输入全丢），
+ * 保存按钮永远置灰 —— 2.4.1 起气泡改为可聚焦；摸鱼诉求只对盯盘条成立（无输入框），
+ * 盯盘条仍保持 `focusable: false`。
  * @returns 窗口句柄；创建失败返回 null
  */
 export const openPopoverWindow = async (): Promise<WebviewWindow | null> => {
@@ -219,7 +224,7 @@ export const openPopoverWindow = async (): Promise<WebviewWindow | null> => {
       alwaysOnTop: true,
       skipTaskbar: true,
       resizable: false,
-      focusable: false,
+      focusable: true,
       shadow: false,
       visible: false,
     });
