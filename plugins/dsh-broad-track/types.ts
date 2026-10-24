@@ -1,0 +1,213 @@
+/**
+ * 插件 dsh-broad-track（宽基跟踪）· 类型定义
+ *
+ * 数据流：
+ * - 日频：ulist 行情快照 + fflow 资金流日 K → `EtfDailyRow`（落库 `etf_daily`）；
+ * - 季频：F10 `gmbd` 份额申赎 → `EtfQuarterRow`（落库 `etf_quarter`）；
+ * - 半年频：F10 `cyrjg` 持有人结构 → `EtfHolderRow`（落库 `etf_holders`）；
+ * - 锚点：用户编辑的 `AnchorHolding[]`（落库 `anchor` 表）。
+ * 展示口径全部由 `estimate.ts` 从落库数据现算（读库即渲染，零联网）。
+ */
+// 宿主服务契约只需要**类型**：`import type` 打包后完全消失，产物里不存在任何
+// 宿主模块的引用，但源码仍然享受完整的类型检查
+import type {
+  FormatService,
+  HttpService,
+  UiKitService,
+} from '../../host/types/plugin.types';
+import type { SignalLevel } from './constants';
+
+/**
+ * 插件运行所需的宿主能力（依赖注入容器）
+ *
+ * 单文件产物形态下没有 import 可用，所有宿主依赖只能从 ctx 上来
+ * （`plugin.ts` 在 `apply(ctx)` 里取齐后沿调用链传下）。
+ */
+export interface BroadDeps {
+  /** 受控网络请求（走宿主上游通道，域名白名单内） */
+  http: HttpService;
+  /** 格式化与涨跌语义（百分比 / 涨跌色 / 限速节拍） */
+  format: FormatService;
+  /** 宿主 UI Kit（卡片 / 表格 / 按钮 / 标签 / 空态 / 图标 / 弹窗） */
+  ui: UiKitService;
+}
+
+/** ulist 批量行情的一行（ETF 或指数） */
+export interface QuoteRow {
+  /** 代码（ETF 为 6 位裸码，指数为 000300 形态） */
+  code: string;
+  /** 名称（上游口径） */
+  name: string;
+  /** 最新价（元 / 点位） */
+  price: number | null;
+  /** 涨跌幅（%） */
+  changePercent: number | null;
+  /** 成交额（元） */
+  amount: number | null;
+}
+
+/** 一只 ETF 在一个交易日的日频行（落库 `etf_daily`） */
+export interface EtfDailyRow {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 6 位裸代码 */
+  code: string;
+  /** 收盘价 / 最新价（元） */
+  price: number | null;
+  /** 涨跌幅（%） */
+  changePercent: number | null;
+  /** 当日成交额（元；ulist 快照口径，非 fflow 字段） */
+  amount: number | null;
+  /** 主力净流入（元） */
+  mainInflow: number | null;
+  /** 超大单净流入（元） */
+  superInflow: number | null;
+  /** 大单净流入（元） */
+  bigInflow: number | null;
+  /** 中单净流入（元） */
+  midInflow: number | null;
+  /** 小单净流入（元） */
+  smallInflow: number | null;
+}
+
+/** 一只 ETF 在一个报告期的份额申赎行（落库 `etf_quarter`） */
+export interface EtfQuarterRow {
+  /** 6 位裸代码 */
+  code: string;
+  /** 报告期（YYYY-MM-DD；季末 / 半年末） */
+  periodEnd: string;
+  /** 期间申购（亿份） */
+  subscribeYi: number | null;
+  /** 期间赎回（亿份） */
+  redeemYi: number | null;
+  /** 期末总份额（亿份） */
+  sharesEndYi: number | null;
+  /** 期末净资产（亿元） */
+  netAssetYi: number | null;
+  /** 净资产变动率（%） */
+  assetChangeRate: number | null;
+}
+
+/** 一只 ETF 在一期的持有人结构行（落库 `etf_holders`） */
+export interface EtfHolderRow {
+  /** 6 位裸代码 */
+  code: string;
+  /** 公告日期（YYYY-MM-DD；半年末 / 年末） */
+  periodEnd: string;
+  /** 机构持有比例（%，真值小数） */
+  instRatio: number | null;
+  /** 总份额（亿份） */
+  totalSharesYi: number | null;
+}
+
+/** 国家队持仓锚点（一只 ETF 一条；用户可编辑） */
+export interface AnchorHolding {
+  /** 6 位裸代码 */
+  code: string;
+  /** 锚点报告期（YYYY-MM-DD） */
+  periodEnd: string;
+  /** 锚点持仓份额（亿份） */
+  sharesYi: number;
+  /** 来源说明（如「2025 年报披露整理」/「按持有人结构推算」） */
+  source: string;
+}
+
+/** 扫描元信息（落库 `scan_meta`，界面页头展示） */
+export interface BroadMeta {
+  /** 日频刷新完成时间（毫秒时间戳；从未刷新为 null） */
+  dailyRefreshedAt: number | null;
+  /** 季度同步完成时间（毫秒时间戳；从未同步为 null） */
+  quarterRefreshedAt: number | null;
+  /** 最近一次刷新的降级与告警（空数组 = 一切正常） */
+  warnings: string[];
+  /** 最近一次刷新拿到的指数快照（页头展示；未刷新为空数组） */
+  indexQuotes: QuoteRow[];
+}
+
+/** 一只 ETF 的国家队持仓预估（展示口径，现算不落库） */
+export interface EtfEstimate {
+  /** 6 位裸代码 */
+  code: string;
+  /** 展示名 */
+  name: string;
+  /** 跟踪指数名 */
+  indexName: string;
+  /** 锚点份额（亿份） */
+  anchorSharesYi: number;
+  /** 锚点报告期 */
+  anchorPeriodEnd: string;
+  /** 锚点来源说明 */
+  anchorSource: string;
+  /** 锚点以来净申购合计（亿份） */
+  netSubscribeYi: number;
+  /** 滚动分摊份额（亿份；净申购 × 国家队占比） */
+  rolledSharesYi: number;
+  /** 预估持仓份额（亿份） */
+  estSharesYi: number;
+  /** 最新价（元） */
+  latestPrice: number | null;
+  /** 预估持仓金额（亿元；价格缺失为 null） */
+  estAmountYi: number | null;
+  /** 锚点折合金额（亿元；用同一最新价折算，缺失为 null） */
+  anchorAmountYi: number | null;
+  /** 预估较锚点变动（亿元；价格缺失为 null） */
+  deltaYi: number | null;
+  /** 最近报告期的期末总份额（亿份；无数据为 null） */
+  sharesEndYi: number | null;
+  /** 最近报告期的净资产（亿元；无数据为 null） */
+  netAssetYi: number | null;
+  /** 最近报告期的净申购（亿份；无数据为 null） */
+  lastNetSubscribeYi: number | null;
+  /** 最近报告期（YYYY-MM-DD；无数据为空串） */
+  lastPeriodEnd: string;
+  /** 最新机构持有比例（0-1；无数据为 null） */
+  instRatio: number | null;
+}
+
+/** 一个交易日聚合后的信号输入（宽基口径合计） */
+export interface SignalDayInput {
+  /** 日期（YYYY-MM-DD） */
+  date: string;
+  /** 宽基指数等权平均涨跌幅（%；无数据为 null） */
+  indexAvgChange: number | null;
+  /** 宽基 ETF 主力净流入合计（元） */
+  mainInflowTotal: number;
+  /** 宽基 ETF 成交额合计（元） */
+  amountTotal: number;
+  /** 近 20 日成交额均值（元；数据不足为 null） */
+  amountAvg20: number | null;
+  /** 截至当日的主力净流出连续天数（当日净流出才计数） */
+  outflowStreak: number;
+}
+
+/** 一个交易日的信号判定结果 */
+export interface SignalDayResult extends SignalDayInput {
+  /** 信号档位 */
+  level: SignalLevel;
+  /** 触发依据（人类可读，逐条列出） */
+  evidences: string[];
+}
+
+/** 宽基跟踪快照（repo 读出口径） */
+export interface BroadSnapshot {
+  /** 代码 → 日频行（升序；可能缺最近交易日） */
+  dailyByCode: Map<string, EtfDailyRow[]>;
+  /** 有日频数据的日期集合（升序） */
+  dailyDates: string[];
+  /** 代码 → 季度行（按期降序） */
+  quartersByCode: Map<string, EtfQuarterRow[]>;
+  /** 代码 → 持有人结构行（按期降序） */
+  holdersByCode: Map<string, EtfHolderRow[]>;
+  /** 锚点清单（按清单顺序） */
+  anchors: AnchorHolding[];
+  /** 扫描元信息 */
+  meta: BroadMeta;
+}
+
+/** 刷新进度载荷 */
+export interface BroadScanProgress {
+  /** 已完成请求数 */
+  done: number;
+  /** 预计请求总数 */
+  total: number;
+}

@@ -10,6 +10,7 @@
     "build:dividend": "node scripts/build-plugins.mjs dsh-dividend-screen",
     "build:note": "node scripts/build-plugins.mjs dsh-quick-note",
     "build:watch": "node scripts/build-plugins.mjs dsh-sidebar-watch",
+    "build:broad": "node scripts/build-plugins.mjs dsh-broad-track",
     "sync:host": "node scripts/sync-host-contract.mjs",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "lint": "eslint plugins scripts",
