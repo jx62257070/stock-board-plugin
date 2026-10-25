@@ -7,3 +7,12 @@
 # 只卡 error 与 warning：`pnpm lint` 无 --max-warnings 时 warning 不影响退出码，
 # 因此这里显式加上 --max-warnings=0，让 JSDoc 之类的缺失也一并拦下。
 pnpm lint --max-warnings=0
+
+# 取数解析层离线自检（上游响应形态是外部契约，形态一变就红）
+#
+# 2026-10-25 踩过的坑：东财 F10 给的是 JavaScript 对象字面量（key 无引号），
+# 不是合法 JSON，解析层用 JSON.parse 整段解析会静默返回 null →
+# 上层拿到 0 行却不报错，界面只显示「份额 0 行、持有人 0 行」。
+# 自检用固化下来的真实上游样本断言「能剥出 content + 列序 + 数值口径」，
+# 把这类「静默归零」挡在提交之前。
+pnpm check:parse

@@ -9,8 +9,11 @@
  * 故用**新浪日 K 的成交量 × 收盘价**近似，并用当日东财精确成交额做单点校准
  * （校准因子 = 精确值 ÷ 近似值，应用到全部历史日；误差在分子分母间基本抵消）。
  *
- * 失败策略：单只 ETF 失败只降级该只（推一条 warning），不影响其余 ETF 与整体落库；
- * 行情批量失败直接抛错（刷新主线中断，提示用户重试）。
+ * 失败策略（2026-10-25 调整）：
+ * - **行情快照**：东财 `ulist` 失败 → 降级新浪 hq；两者都失败才抛错。
+ *   （东财行情域会被整域掐断，此前「一失败就整体中断」导致页面完全空白。）
+ * - **资金流**：逐 ETF 走三源降级链（push2his → push2delay → 新浪），
+ *   单只失败只降级该只（推一条 warning），不影响其余 ETF 与整体落库。
  */
 import {
   EM_F10_DELAY_MS,
@@ -26,6 +29,7 @@ import {
   fetchFflowDays,
   fetchGmbdRows,
   fetchQuoteBatch,
+  fetchSinaHqQuotes,
   fetchSinaKline,
 } from './em-data';
 import type { SinaKlineRow } from './em-parse';
@@ -122,9 +126,50 @@ export const refreshDaily = async (
   };
   const warnings: string[] = [];
 
-  // 1) 行情快照：ETF + 宽基指数一个批量（失败直接抛错，刷新中断）
+  // 1) 行情快照：ETF + 宽基指数一个批量
+  //    主源东财 ulist；该域被整域掐断时降级新浪 hq（两者都失败才抛错）
   const secids = [...etfs.map(etfSecid), ...TRACKED_INDICES.map((item) => item.secid)];
-  const quotes = await fetchQuoteBatch(deps, secids, tick);
+  const sinaSymbols = [
+    ...etfs.map(etfSinaSymbol),
+    ...TRACKED_INDICES.map((item) => item.sinaSymbol),
+  ];
+
+  let quotes: QuoteRow[] = [];
+  let quoteSourceError: string | null = null;
+  try {
+    quotes = await fetchQuoteBatch(deps, secids, tick);
+  } catch (error) {
+    quoteSourceError = errorMessage(error);
+    // ⚠️ 不在此处补 tick：东财那一批的进度已在 fetchQuoteBatch 内部计过，
+    // 再补一次会让 done 超过 total（进度条显示越界）。降级请求也不单独计数 ——
+    // 它是同一步骤的重试，对用户而言仍是「取行情」这一件事。
+  }
+  if (quotes.length === 0) {
+    // 东财没出数 → 换新浪 hq 接管
+    try {
+      quotes = await fetchSinaHqQuotes(deps, sinaSymbols);
+      if (quotes.length > 0) {
+        warnings.push(
+          `东财行情源不可达（${quoteSourceError ?? '无数据'}），已降级新浪行情源`,
+        );
+      }
+    } catch (error) {
+      const sinaError = errorMessage(error);
+      if (quoteSourceError !== null) {
+        throw new Error(
+          `东财行情源失败（${quoteSourceError}）且新浪降级源失败（${sinaError}）`,
+          { cause: error },
+        );
+      }
+      throw new Error(`新浪行情源失败：${sinaError}`, { cause: error });
+    }
+    if (quotes.length === 0) {
+      throw new Error(
+        `东财与新浪行情源均无数据（东财：${quoteSourceError ?? '无数据'}）`,
+      );
+    }
+  }
+
   const quoteByCode = new Map<string, QuoteRow>(quotes.map((row) => [row.code, row]));
   const indexQuotes: QuoteRow[] = [];
   for (const index of TRACKED_INDICES) {
@@ -132,7 +177,7 @@ export const refreshDaily = async (
     if (quote) indexQuotes.push({ ...quote, name: index.name });
   }
 
-  // 2) 逐 ETF：资金流（东财）+ 日 K（新浪，成交额历史）
+  // 2) 逐 ETF：资金流（东财 → 新浪三源降级）+ 日 K（新浪，成交额历史）
   const rows: EtfDailyRow[] = [];
   let first = true;
   for (const etf of etfs) {
@@ -141,7 +186,7 @@ export const refreshDaily = async (
 
     let flowRows;
     try {
-      flowRows = await fetchFflowDays(deps, etfSecid(etf), tick);
+      flowRows = await fetchFflowDays(deps, etfSecid(etf), etfSinaSymbol(etf), tick);
     } catch (error) {
       tick();
       warnings.push(`${etf.name}（${etf.code}）资金流取数失败：${errorMessage(error)}`);

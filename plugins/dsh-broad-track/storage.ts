@@ -25,11 +25,15 @@ import type {
   EtfDailyRow,
   EtfHolderRow,
   EtfQuarterRow,
+  EtfShareRow,
 } from './types';
 import type { PluginDatabase, PluginDbColumn, PluginDbRow } from '../../host/types/plugin.types';
 
 /** 日频表名（物理表 `plugin_dsh_broad_track_etf_daily`） */
 export const BROAD_DAILY_TABLE = 'etf_daily';
+
+/** 份额日频表名（物理表 `plugin_dsh_broad_track_etf_share_daily`） */
+export const BROAD_SHARE_TABLE = 'etf_share_daily';
 
 /** 季度份额表名 */
 export const BROAD_QUARTER_TABLE = 'etf_quarter';
@@ -61,6 +65,22 @@ export const BROAD_DAILY_COLUMNS: readonly PluginDbColumn[] = [
   { name: 'big_inflow', type: 'real' },
   { name: 'mid_inflow', type: 'real' },
   { name: 'small_inflow', type: 'real' },
+];
+
+/**
+ * 份额日频表的列声明
+ *
+ * 唯一键（date, code）；`shares_yi` 是期末总份额，`delta_yi` 是较上一有数据
+ * 交易日的份额变动（正 = 净申购），`amount_yi` 是用收盘价折算的估算净申赎金额。
+ */
+export const BROAD_SHARE_COLUMNS: readonly PluginDbColumn[] = [
+  { name: 'date', type: 'text', indexed: true },
+  { name: 'code', type: 'text', indexed: true },
+  { name: 'shares_yi', type: 'real' },
+  { name: 'delta_yi', type: 'real' },
+  { name: 'price', type: 'real' },
+  { name: 'amount_yi', type: 'real' },
+  { name: 'source', type: 'text' },
 ];
 
 /** 季度份额表的列声明 */
@@ -123,6 +143,16 @@ export interface BroadRepo {
    */
   saveDailyRows: (rows: readonly EtfDailyRow[]) => Promise<void>;
   /**
+   * 落库份额行（按 (date, code) upsert）
+   * @param rows 份额行
+   */
+  saveShareRows: (rows: readonly EtfShareRow[]) => Promise<void>;
+  /**
+   * 读已有的份额日期集合（升序）—— 增量同步用：已入库的日期不再回源
+   * @returns 日期集合（升序）
+   */
+  existingShareDates: () => Promise<string[]>;
+  /**
    * 落库季度行（按 (code, period_end) upsert）
    * @param rows 季度行
    */
@@ -183,6 +213,21 @@ const hydrateDaily = (row: PluginDbRow<Record<string, unknown>>): EtfDailyRow =>
 });
 
 /**
+ * 库里的份额行还原成展示行
+ * @param row 库里的一行
+ * @returns 份额行
+ */
+const hydrateShare = (row: PluginDbRow<Record<string, unknown>>): EtfShareRow => ({
+  date: text(row, 'date'),
+  code: text(row, 'code'),
+  sharesYi: num(row, 'shares_yi') ?? 0,
+  deltaYi: num(row, 'delta_yi') ?? 0,
+  price: num(row, 'price'),
+  amountYi: num(row, 'amount_yi'),
+  source: text(row, 'source') === 'szse' ? 'szse' : 'sse',
+});
+
+/**
  * 库里的季度行还原成展示行
  * @param row 库里的一行
  * @returns 季度行
@@ -238,6 +283,9 @@ const EMPTY_META: BroadMeta = {
   quarterRefreshedAt: null,
   warnings: [],
   indexQuotes: [],
+  shareSyncedAt: null,
+  shareEarliestDate: '',
+  shareLatestDate: '',
 };
 
 /**
@@ -247,12 +295,14 @@ const EMPTY_META: BroadMeta = {
  */
 export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> => {
   await db.ensureTable(BROAD_DAILY_TABLE, BROAD_DAILY_COLUMNS);
+  await db.ensureTable(BROAD_SHARE_TABLE, BROAD_SHARE_COLUMNS);
   await db.ensureTable(BROAD_QUARTER_TABLE, BROAD_QUARTER_COLUMNS);
   await db.ensureTable(BROAD_HOLDERS_TABLE, BROAD_HOLDERS_COLUMNS);
   await db.ensureTable(BROAD_ANCHOR_TABLE, BROAD_ANCHOR_COLUMNS);
   await db.ensureTable(BROAD_META_TABLE, BROAD_META_COLUMNS);
 
   const dailyByCode = ref<Map<string, EtfDailyRow[]>>(new Map());
+  const sharesByCode = ref<Map<string, EtfShareRow[]>>(new Map());
   const quartersByCode = ref<Map<string, EtfQuarterRow[]>>(new Map());
   const holdersByCode = ref<Map<string, EtfHolderRow[]>>(new Map());
   const anchors = ref<AnchorHolding[]>([]);
@@ -270,6 +320,17 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
     else dailyMap.set(row.code, [row]);
   }
   dailyByCode.value = dailyMap;
+
+  const storedShares = await db.select<Record<string, unknown>>(BROAD_SHARE_TABLE, {
+    orderBy: { column: 'date' },
+  });
+  const shareMap = new Map<string, EtfShareRow[]>();
+  for (const row of storedShares.map(hydrateShare)) {
+    const bucket = shareMap.get(row.code);
+    if (bucket) bucket.push(row);
+    else shareMap.set(row.code, [row]);
+  }
+  sharesByCode.value = shareMap;
 
   const storedQuarter = await db.select<Record<string, unknown>>(BROAD_QUARTER_TABLE, {
     orderBy: { column: 'period_end' },
@@ -318,9 +379,15 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
     for (const rows of dailyByCode.value.values()) {
       for (const row of rows) dates.add(row.date);
     }
+    const shareDates = new Set<string>();
+    for (const rows of sharesByCode.value.values()) {
+      for (const row of rows) shareDates.add(row.date);
+    }
     return {
       dailyByCode: dailyByCode.value,
       dailyDates: [...dates].sort(),
+      sharesByCode: sharesByCode.value,
+      shareDates: [...shareDates].sort(),
       quartersByCode: quartersByCode.value,
       holdersByCode: holdersByCode.value,
       anchors: anchors.value,
@@ -364,6 +431,58 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
       map.set(row.code, bucket);
     }
     dailyByCode.value = map;
+  };
+
+  /**
+   * 份额行 upsert（同 (date, code) 已存在则更新）
+   * @param rows 份额行
+   */
+  const saveShareRows = async (rows: readonly EtfShareRow[]): Promise<void> => {
+    if (rows.length === 0) return;
+    const map = new Map(sharesByCode.value);
+    for (const row of rows) {
+      const existing = await db.select<Record<string, unknown>>(BROAD_SHARE_TABLE, {
+        where: { date: row.date, code: row.code },
+      });
+      const record: Record<string, unknown> = {
+        date: row.date,
+        code: row.code,
+        shares_yi: row.sharesYi,
+        delta_yi: row.deltaYi,
+        price: row.price,
+        amount_yi: row.amountYi,
+        source: row.source,
+      };
+      if (existing.length > 0) {
+        await db.update(BROAD_SHARE_TABLE, existing[0].id, record);
+      } else {
+        await db.insert(BROAD_SHARE_TABLE, record);
+      }
+      // 内存 map 同步（替换该 code 的该日期行）
+      const bucket = map.get(row.code) ?? [];
+      const index = bucket.findIndex((item) => item.date === row.date);
+      if (index >= 0) bucket[index] = row;
+      else bucket.push(row);
+      bucket.sort((left, right) => (left.date < right.date ? -1 : 1));
+      map.set(row.code, bucket);
+    }
+    sharesByCode.value = map;
+  };
+
+  /**
+   * 读已有的份额日期集合（增量同步用：已入库的日期不再回源）
+   * @returns 日期集合（升序）
+   */
+  const existingShareDates = async (): Promise<string[]> => {
+    const stored = await db.select<Record<string, unknown>>(BROAD_SHARE_TABLE, {
+      orderBy: { column: 'date' },
+    });
+    const dates = new Set<string>();
+    for (const row of stored) {
+      const value = text(row, 'date');
+      if (value) dates.add(value);
+    }
+    return [...dates].sort();
   };
 
   /**
@@ -461,6 +580,8 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
   return {
     snapshot,
     saveDailyRows,
+    saveShareRows,
+    existingShareDates,
     saveQuarterRows,
     saveHolderRows,
     saveAnchors,

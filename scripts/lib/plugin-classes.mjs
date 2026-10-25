@@ -4,7 +4,7 @@
  * **为什么需要它**：Tailwind 在构建期只扫描宿主源码。官方插件改成 zip 产物包分发之后，
  * 它们的 `.vue` 已经不在宿主的 `src/` 下 —— 类名能否出现在产物 CSS 里，一度全靠
  * 「宿主别处也用了同一个类」。这份清单把巧合变成保证：宿主的
- * `src/assets/styles/theme.css` 用 `@source './plugin-classes.txt'` 把它纳入扫描，
+ * `src/common/assets/styles/theme.css` 用 `@source './plugin-classes.txt'` 把它纳入扫描，
  * 于是这些类无论宿主自己用不用，产物 CSS 里都会生成。
  *
  * 约定：清单在**宿主仓库**里入库（它本身不是构建产物），本仓库打包后写回宿主；
@@ -13,8 +13,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-/** 清单文件路径（相对**宿主**仓库根，入库） */
-export const CLASS_ALLOWLIST_RELATIVE = path.join('src', 'assets', 'styles', 'plugin-classes.txt');
+/**
+ * 清单文件路径（相对**宿主**仓库根，入库）
+ *
+ * 宿主 v4.21.0 把样式目录从 `src/assets/styles/` 迁到了 `src/common/assets/styles/`
+ * （`src/common` + `src/pc` + `src/mobile` 新结构）。这里按新结构写死；
+ * 老结构已随版本删除，不必再兼容。
+ */
+export const CLASS_ALLOWLIST_RELATIVE = path.join('src', 'common', 'assets', 'styles', 'plugin-classes.txt');
 
 /** 长得像 Tailwind 工具类的 token（含 `sm:` 变体前缀与 `[11px]` 任意值） */
 const CLASS_LIKE = /^(?:[a-z-]+:)*[a-z][a-z0-9/.-]*(?:\[[^\]]+\])?$/;
@@ -100,7 +106,7 @@ export const readExistingAllowlist = (hostRoot) => {
 };
 
 /**
- * 把类名清单写进宿主的 `src/assets/styles/plugin-classes.txt`
+ * 把类名清单写进宿主的 `src/common/assets/styles/plugin-classes.txt`
  * @param hostRoot 宿主仓库根目录
  * @param classes 完整类名集合（已含历史）
  */

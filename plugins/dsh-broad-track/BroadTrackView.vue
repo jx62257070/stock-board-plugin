@@ -14,6 +14,14 @@ import {
   sumEstimates,
 } from './estimate';
 import {
+  buildComboSeries,
+  buildShareSignalTimeline,
+  buildShareSignalWaves,
+  recentNetFlow,
+  runShareBacktest,
+} from './share-signal';
+import { syncShareSeries } from './share-sync';
+import {
   ANCHOR_DEFAULT_PERIOD,
   BROAD_ANCHOR_AUTO,
   BROAD_ANCHOR_COLUMN_LABEL,
@@ -36,6 +44,18 @@ import {
   BROAD_REFRESH_BUTTON,
   BROAD_REFRESH_FAILED,
   BROAD_RUNNING,
+  BROAD_SHARE_CHART_NOTE,
+  BROAD_SHARE_CHART_TITLE,
+  BROAD_SHARE_COLUMN_LABEL,
+  BROAD_SHARE_NOTE,
+  BROAD_SHARE_RANGE_LABEL,
+  BROAD_SHARE_SOURCE_LABEL,
+  BROAD_SHARE_SUMMARY_LABEL,
+  BROAD_SHARE_SYNC_BUTTON,
+  BROAD_SHARE_SYNC_FAILED,
+  BROAD_SHARE_SYNCING,
+  BROAD_SHARE_TABLE_TITLE,
+  BROAD_SHARE_TITLE,
   BROAD_SIGNAL_EVIDENCE_TITLE,
   BROAD_SIGNAL_NOTE,
   BROAD_SIGNAL_TIMELINE_TITLE,
@@ -45,7 +65,14 @@ import {
   BROAD_SYNC_BUTTON,
   BROAD_SYNC_FAILED,
   BROAD_TABLE_TITLE,
+  BROAD_WAVE_NOTE,
+  BROAD_WAVE_TITLE,
+  BROAD_BACKTEST_LABEL,
+  BROAD_BACKTEST_NOTE,
+  BROAD_BACKTEST_TITLE,
   NATIONAL_TEAM_OF_INST_RATIO,
+  SHARE_SIGNAL_BADGE_CLASS,
+  SHARE_SIGNAL_LABEL,
   SIGNAL_LEVEL_BADGE_CLASS,
   SIGNAL_LEVEL_BLOCK_CLASS,
   SIGNAL_LEVEL_LABEL,
@@ -59,9 +86,12 @@ import type {
   AnchorHolding,
   BroadDeps,
   BroadScanProgress,
+  ComboSharePoint,
   EtfEstimate,
   EtfQuarterRow,
   QuoteRow,
+  ShareBacktestStat,
+  ShareSignalDay,
   SignalDayResult,
 } from './types';
 
@@ -320,6 +350,190 @@ const draftAmountYi = (code: string): string => {
   return ((draft.sharesYi * price) / YUAN_PER_YI).toFixed(1);
 };
 
+// ---------- 份额口径（国家队主口径） ----------
+
+/** 是否正在同步份额序列 */
+const shareSyncing = ref(false);
+
+/** 组合逐日份额序列（由落库份额行现算） */
+const comboSeries = computed<ComboSharePoint[]>(() =>
+  buildComboSeries(snapshot.value.sharesByCode),
+);
+
+/** 是否有份额数据 */
+const hasShares = computed(() => comboSeries.value.length > 0);
+
+/** 逐日份额信号（图表标注用） */
+const shareTimeline = computed<ShareSignalDay[]>(() =>
+  buildShareSignalTimeline(comboSeries.value),
+);
+
+/** 信号波段（统计与回测用；一次战役算一个） */
+const shareWaves = computed(() => buildShareSignalWaves(comboSeries.value));
+
+/** 近 120 日的逐日信号（时间线条展示用） */
+const recentShareTimeline = computed<ShareSignalDay[]>(() =>
+  shareTimeline.value.slice(-120),
+);
+
+/** 回测统计 */
+const backtestStats = computed<ShareBacktestStat[]>(() =>
+  runShareBacktest(comboSeries.value),
+);
+
+/** 最新交易日的组合快照（null = 无数据） */
+const latestCombo = computed<ComboSharePoint | null>(() => {
+  const list = comboSeries.value;
+  return list.length > 0 ? list[list.length - 1] : null;
+});
+
+/** 近 5 日净申赎合计 */
+const recentFlow = computed(() => recentNetFlow(comboSeries.value, 5));
+
+/** 份额曲线 SVG 路径（组合总份额） */
+const sharePath = computed(() => {
+  const list = comboSeries.value;
+  if (list.length < 2) return '';
+  const values = list.map((point) => point.totalSharesYi);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const width = 1000;
+  const height = 100;
+  return list
+    .map((point, index) => {
+      const x = (index / (list.length - 1)) * width;
+      const y = height - ((point.totalSharesYi - min) / span) * height;
+      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+});
+
+/** 份额曲线的时间轴刻度（首 / 中 / 末） */
+const shareAxis = computed(() => {
+  const list = comboSeries.value;
+  if (list.length === 0) return { first: '', middle: '', last: '' };
+  const middle = list[Math.floor(list.length / 2)];
+  return {
+    first: list[0].date.slice(0, 7),
+    middle: middle.date.slice(0, 7),
+    last: list[list.length - 1].date.slice(0, 7),
+  };
+});
+
+/** 每日净申赎柱（近 N 日；正红负绿） */
+const flowBars = computed(() => {
+  const list = comboSeries.value.slice(-120);
+  const values = list.map((point) => point.netFlowYi ?? 0);
+  const max = Math.max(...values.map((v) => Math.abs(v)), 1);
+  return list.map((point) => ({
+    date: point.date,
+    value: point.netFlowYi,
+    height: (Math.abs(point.netFlowYi ?? 0) / max) * 100,
+  }));
+});
+
+/** 信号在曲线上的标记位置（X 轴百分比） */
+const waveMarkers = computed(() => {
+  const list = comboSeries.value;
+  if (list.length === 0) return [];
+  const indexByDate = new Map(list.map((point, index) => [point.date, index]));
+  const marks: { date: string; level: 'enter' | 'exit'; left: number }[] = [];
+  for (const wave of shareWaves.value) {
+    if (wave.level === 'none') continue;
+    const index = indexByDate.get(wave.date);
+    if (index === undefined) continue;
+    marks.push({
+      date: wave.date,
+      level: wave.level,
+      left: (index / (list.length - 1)) * 100,
+    });
+  }
+  return marks;
+});
+
+/** 份额明细表的一行 */
+interface ShareRowView {
+  /** ETF 代码 */
+  code: string;
+  /** ETF 展示名 */
+  name: string;
+  /** 跟踪指数 */
+  indexName: string;
+  /** 最新总份额（亿份） */
+  sharesYi: number | null;
+  /** 最新日份额变动（亿份） */
+  deltaYi: number | null;
+  /** 最新日估算净申赎（亿元） */
+  amountYi: number | null;
+  /** 最新收盘价 */
+  price: number | null;
+  /** 近 5 日份额变动合计（亿份） */
+  recentDeltaYi: number | null;
+  /** 数据源 */
+  source: string;
+}
+
+/** 份额明细表行（每只 ETF 取最新一行 + 近 5 日变动） */
+const shareRows = computed<ShareRowView[]>(() => {
+  const snap = snapshot.value;
+  return TRACKED_ETFS.map((etf) => {
+    const list = snap.sharesByCode.get(etf.code) ?? [];
+    const latest = list.length > 0 ? list[list.length - 1] : null;
+    const recent = list.slice(-5);
+    return {
+      code: etf.code,
+      name: etf.name,
+      indexName: etf.indexName,
+      sharesYi: latest?.sharesYi ?? null,
+      deltaYi: latest?.deltaYi ?? null,
+      amountYi: latest?.amountYi ?? null,
+      price: latest?.price ?? null,
+      recentDeltaYi:
+        recent.length > 0 ? recent.reduce((sum, row) => sum + row.deltaYi, 0) : null,
+      source: latest?.source ?? 'sse',
+    };
+  });
+});
+
+/** 份额明细表列定义 */
+const shareColumns: TableColumn<ShareRowView>[] = [
+  { key: 'name', label: BROAD_SHARE_COLUMN_LABEL.name },
+  { key: 'index', label: BROAD_SHARE_COLUMN_LABEL.index },
+  { key: 'shares', label: BROAD_SHARE_COLUMN_LABEL.shares, align: 'right' },
+  { key: 'delta', label: BROAD_SHARE_COLUMN_LABEL.delta, align: 'right' },
+  { key: 'flow', label: BROAD_SHARE_COLUMN_LABEL.flow, align: 'right' },
+  { key: 'price', label: BROAD_SHARE_COLUMN_LABEL.price, align: 'right' },
+  { key: 'recent', label: BROAD_SHARE_COLUMN_LABEL.recent, align: 'right' },
+  { key: 'source', label: BROAD_SHARE_COLUMN_LABEL.source },
+];
+
+/** 份额明细表最小宽度 */
+const shareMinWidth = 900;
+
+/**
+ * 同步份额序列（用户点击触发；增量入库，只补缺失日期）
+ */
+const onSyncShares = async (): Promise<void> => {
+  shareSyncing.value = true;
+  progress.value = null;
+  notice.value = '';
+  try {
+    const result = await syncShareSeries(props.deps, props.repo, (next) => {
+      progress.value = next;
+    });
+    const warnText = result.warnings.length > 0 ? `，${result.warnings.length} 条告警` : '';
+    notice.value =
+      `份额同步完成：新增 ${result.rowCount} 行（${result.requestCount} 次请求）`
+      + `${result.earliestDate ? `，覆盖 ${result.earliestDate} ~ ${result.latestDate}` : ''}${warnText}`;
+  } catch (error) {
+    notice.value = `${BROAD_SHARE_SYNC_FAILED}：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    shareSyncing.value = false;
+    progress.value = null;
+  }
+};
+
 // ---------- 刷新动作 ----------
 
 /**
@@ -442,11 +656,18 @@ const shortDate = (date: string): string => date.slice(5);
           <span v-if="progress" class="text-xs tabular-nums text-text-tertiary">
             {{ BROAD_RUNNING }} {{ progress.done }}/{{ progress.total }}
           </span>
-          <component :is="deps.ui.Button" :disabled="refreshing || syncing" @click="onRefreshDaily">
+          <component
+            :is="deps.ui.Button"
+            :disabled="shareSyncing || refreshing || syncing"
+            @click="onSyncShares"
+          >
             <component :is="deps.ui.Icon" :name="BROAD_MENU_ICON" :size="14" />
+            {{ shareSyncing ? BROAD_SHARE_SYNCING : BROAD_SHARE_SYNC_BUTTON }}
+          </component>
+          <component :is="deps.ui.Button" variant="ghost" :disabled="refreshing || syncing || shareSyncing" @click="onRefreshDaily">
             {{ BROAD_REFRESH_BUTTON }}
           </component>
-          <component :is="deps.ui.Button" variant="ghost" :disabled="refreshing || syncing" @click="onSyncQuarter">
+          <component :is="deps.ui.Button" variant="ghost" :disabled="refreshing || syncing || shareSyncing" @click="onSyncQuarter">
             {{ BROAD_SYNC_BUTTON }}
           </component>
         </div>
@@ -454,13 +675,14 @@ const shortDate = (date: string): string => date.slice(5);
 
       <!-- 元信息：刷新时间 / 覆盖 / 告警数 -->
       <div
-        v-if="hasDaily"
+        v-if="hasDaily || hasShares"
         class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-tertiary"
       >
-        <span>{{ BROAD_HEADER_LABEL.dailyAt }}：{{ fmtRelative(snapshot.meta.dailyRefreshedAt) }}</span>
-        <span>{{ BROAD_HEADER_LABEL.quarterAt }}：{{ fmtRelative(snapshot.meta.quarterRefreshedAt) }}</span>
+        <span v-if="hasShares">{{ BROAD_HEADER_LABEL.dailyAt }}：{{ fmtRelative(snapshot.meta.shareSyncedAt) }}</span>
+        <span v-if="hasDaily">{{ BROAD_HEADER_LABEL.quarterAt }}：{{ fmtRelative(snapshot.meta.quarterRefreshedAt) }}</span>
         <span>{{ BROAD_HEADER_LABEL.etfCount }}：{{ TRACKED_ETFS.length }}</span>
-        <span>{{ BROAD_HEADER_LABEL.dayCount }}：{{ snapshot.dailyDates.length }}</span>
+        <span v-if="hasDaily">{{ BROAD_HEADER_LABEL.dayCount }}：{{ snapshot.dailyDates.length }}</span>
+        <span v-if="hasShares">份额交易日：{{ snapshot.shareDates.length }}</span>
         <button
           type="button"
           class="pressable rounded px-1 py-0.5 text-primary active:scale-95"
@@ -478,10 +700,300 @@ const shortDate = (date: string): string => date.slice(5);
       </p>
     </component>
 
-    <!-- 空态：未刷新过 -->
-    <component :is="deps.ui.Card" v-if="!hasDaily">
+    <!-- 空态：未同步过份额 -->
+    <component :is="deps.ui.Card" v-if="!hasShares && !hasDaily">
       <component :is="deps.ui.Empty" :text="BROAD_EMPTY_TEXT" />
+      <p class="mt-3 text-center text-xs leading-relaxed text-text-tertiary">
+        「同步份额序列」会从交易所拉取 2024-01 至今的逐日份额（约 680 个交易日，数十秒完成），
+        结果落本地插件库，之后读库即渲染、零联网。
+      </p>
     </component>
+
+    <template v-if="hasShares">
+      <!-- 份额序列主口径：汇总 + 曲线 + 净申赎柱 -->
+      <component :is="deps.ui.Card" :title="BROAD_SHARE_TITLE">
+        <template #extra>
+          <component
+            :is="deps.ui.Button"
+            variant="ghost"
+            :disabled="shareSyncing || refreshing || syncing"
+            @click="onSyncShares"
+          >
+            {{ BROAD_SHARE_SYNC_BUTTON }}
+          </component>
+        </template>
+
+        <!-- 汇总指标 -->
+        <div class="flex flex-wrap items-end gap-x-8 gap-y-3">
+          <div>
+            <p class="text-xs text-text-tertiary">{{ BROAD_SHARE_SUMMARY_LABEL.totalShares }}</p>
+            <p class="mt-0.5 text-2xl font-semibold tabular-nums text-text">
+              {{ latestCombo ? latestCombo.totalSharesYi.toFixed(0) : BROAD_PLACEHOLDER }}
+              <span class="text-sm font-normal text-text-tertiary">亿份</span>
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-text-tertiary">{{ BROAD_SHARE_SUMMARY_LABEL.todayFlow }}</p>
+            <p
+              class="mt-0.5 text-lg font-medium tabular-nums"
+              :class="trendClass(latestCombo?.netFlowYi ?? null)"
+            >
+              {{
+                latestCombo?.netFlowYi === null || latestCombo?.netFlowYi === undefined
+                  ? BROAD_PLACEHOLDER
+                  : `${latestCombo.netFlowYi >= 0 ? '+' : ''}${latestCombo.netFlowYi.toFixed(0)}`
+              }}
+              <span class="text-xs font-normal text-text-tertiary">亿元</span>
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-text-tertiary">{{ BROAD_SHARE_SUMMARY_LABEL.recentFlow }}</p>
+            <p
+              class="mt-0.5 text-lg font-medium tabular-nums"
+              :class="trendClass(recentFlow.totalYi)"
+            >
+              {{ recentFlow.totalYi >= 0 ? '+' : '' }}{{ recentFlow.totalYi.toFixed(0) }}
+              <span class="text-xs font-normal text-text-tertiary">亿元</span>
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-text-tertiary">{{ BROAD_SHARE_SUMMARY_LABEL.indexLevel }}</p>
+            <p class="mt-0.5 text-lg font-medium tabular-nums text-text">
+              {{ latestCombo?.avgPrice === null || latestCombo?.avgPrice === undefined
+                ? BROAD_PLACEHOLDER
+                : latestCombo.avgPrice.toFixed(1) }}
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-text-tertiary">{{ BROAD_SHARE_SUMMARY_LABEL.days }}</p>
+            <p class="mt-0.5 text-lg font-medium tabular-nums text-text">
+              {{ comboSeries.length }}
+            </p>
+          </div>
+        </div>
+
+        <!-- 份额曲线（SVG 折线） -->
+        <div class="mt-4">
+          <div class="relative h-24 w-full">
+            <svg
+              class="h-full w-full"
+              :viewBox="`0 0 1000 100`"
+              preserveAspectRatio="none"
+              role="img"
+              aria-label="组合总份额走势"
+            >
+              <polyline
+                :points="sharePath"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                vector-effect="non-scaling-stroke"
+                class="text-primary"
+              />
+            </svg>
+            <!-- 信号标记 -->
+            <span
+              v-for="mark in waveMarkers"
+              :key="`${mark.date}-${mark.level}`"
+              class="absolute top-0 h-full w-0.5 -translate-x-1/2"
+              :class="mark.level === 'enter' ? 'bg-up' : 'bg-down'"
+              :style="{ left: `${mark.left}%` }"
+              :title="`${mark.date} ${SHARE_SIGNAL_LABEL[mark.level]}`"
+            />
+          </div>
+          <div class="mt-1 flex justify-between text-[10px] tabular-nums text-text-tertiary">
+            <span>{{ shareAxis.first }}</span>
+            <span>{{ shareAxis.middle }}</span>
+            <span>{{ shareAxis.last }}</span>
+          </div>
+        </div>
+
+        <!-- 每日净申赎柱（近 120 日） -->
+        <div class="mt-3">
+          <p class="mb-1 text-xs font-medium text-text-secondary">
+            {{ BROAD_SHARE_CHART_TITLE }}
+          </p>
+          <div class="flex h-16 items-end gap-px">
+            <div
+              v-for="bar in flowBars"
+              :key="bar.date"
+              class="group relative flex-1"
+              :style="{ height: `${Math.max(bar.height, 1)}%` }"
+            >
+              <div
+                class="h-full w-full rounded-t-[1px]"
+                :class="(bar.value ?? 0) >= 0 ? 'bg-up-weak' : 'bg-down-weak'"
+              />
+              <span
+                class="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] tabular-nums text-text shadow-sm group-hover:block"
+              >
+                {{ bar.date.slice(5) }} · {{ bar.value === null ? '—' : `${bar.value.toFixed(0)} 亿` }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 逐日信号时间线条（近 120 日） -->
+        <div class="mt-3">
+          <p class="mb-1 text-xs font-medium text-text-secondary">近 120 日信号状态</p>
+          <div class="flex items-end gap-px">
+            <div
+              v-for="day in recentShareTimeline"
+              :key="day.date"
+              class="h-4 flex-1 rounded-[1px]"
+              :class="
+                day.level === 'enter'
+                  ? 'bg-up'
+                  : day.level === 'exit'
+                    ? 'bg-down'
+                    : 'bg-flat-weak'
+              "
+              :title="`${day.date} ${SHARE_SIGNAL_LABEL[day.level]}`"
+            />
+          </div>
+          <div class="mt-1 flex justify-between text-[10px] tabular-nums text-text-tertiary">
+            <span>{{ recentShareTimeline.length > 0 ? shortDate(recentShareTimeline[0].date) : '' }}</span>
+            <span>
+              {{ recentShareTimeline.length > 0 ? shortDate(recentShareTimeline[recentShareTimeline.length - 1].date) : '' }}
+            </span>
+          </div>
+        </div>
+
+        <p class="mt-3 text-xs leading-relaxed text-text-tertiary">{{ BROAD_SHARE_NOTE }}</p>
+        <p class="mt-1 text-xs leading-relaxed text-text-tertiary">{{ BROAD_SHARE_CHART_NOTE }}</p>
+        <p class="mt-1 text-xs text-text-tertiary">
+          {{ BROAD_SHARE_RANGE_LABEL }}：{{ snapshot.meta.shareEarliestDate || '—' }} ~
+          {{ snapshot.meta.shareLatestDate || '—' }}
+          （{{ fmtRelative(snapshot.meta.shareSyncedAt) }}同步）
+        </p>
+      </component>
+
+      <!-- 进场 / 退场信号波段 -->
+      <component :is="deps.ui.Card" :title="BROAD_WAVE_TITLE">
+        <div v-if="shareWaves.length > 0" class="space-y-2">
+          <div
+            v-for="wave in [...shareWaves].reverse()"
+            :key="`${wave.date}-${wave.level}`"
+            class="flex items-start gap-3 rounded-lg border border-flat-weak px-3 py-2"
+          >
+            <span
+              class="mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-xs font-medium"
+              :class="SHARE_SIGNAL_BADGE_CLASS[wave.level]"
+            >
+              {{ SHARE_SIGNAL_LABEL[wave.level] }}
+            </span>
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                <span class="text-xs font-medium tabular-nums text-text">{{ wave.date }}</span>
+                <span class="text-[11px] text-text-tertiary">
+                  持续 {{ wave.days }} 日（连续 {{ wave.streak }} 日同向）
+                </span>
+                <span class="text-[11px] tabular-nums" :class="trendClass(wave.deltaSharesYi)">
+                  份额 {{ wave.deltaSharesYi >= 0 ? '+' : '' }}{{ wave.deltaSharesYi.toFixed(0) }} 亿份
+                </span>
+                <span class="text-[11px] tabular-nums" :class="trendClass(wave.netFlowYi)">
+                  净申赎 {{ wave.netFlowYi === null ? '—' : `${wave.netFlowYi >= 0 ? '+' : ''}${wave.netFlowYi.toFixed(0)}` }} 亿元
+                </span>
+                <span v-if="wave.indexReturn !== null" class="text-[11px] tabular-nums text-text-tertiary">
+                  区间指数 {{ wave.indexReturn >= 0 ? '+' : '' }}{{ wave.indexReturn.toFixed(1) }}%
+                </span>
+              </div>
+              <ul class="mt-1 space-y-0.5">
+                <li
+                  v-for="(evidence, index) in wave.evidences"
+                  :key="index"
+                  class="flex items-start gap-1.5 text-[11px] leading-relaxed text-text-secondary"
+                >
+                  <span class="mt-1.5 inline-block h-1 w-1 shrink-0 rounded-full bg-text-tertiary" />
+                  {{ evidence }}
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <p v-else class="text-xs text-text-tertiary">
+          暂无满足条件的信号（需要连续同向变动 + 累计金额达标 + 指数位置匹配）。
+        </p>
+        <p class="mt-3 text-xs leading-relaxed text-text-tertiary">{{ BROAD_WAVE_NOTE }}</p>
+      </component>
+
+      <!-- 信号回测 -->
+      <component :is="deps.ui.Card" :title="BROAD_BACKTEST_TITLE">
+        <div class="flex flex-wrap items-end gap-x-8 gap-y-3">
+          <div v-for="stat in backtestStats" :key="stat.level">
+            <p class="text-xs text-text-tertiary">
+              {{ SHARE_SIGNAL_LABEL[stat.level] }} · {{ BROAD_BACKTEST_LABEL.count }}
+            </p>
+            <p class="mt-0.5 text-2xl font-semibold tabular-nums text-text">{{ stat.count }}</p>
+            <p class="mt-0.5 text-xs tabular-nums text-text-secondary">
+              {{ BROAD_BACKTEST_LABEL.returnHold }}：
+              <span :class="trendClass(stat.avgReturnHold)">
+                {{ stat.avgReturnHold === null ? '—' : `${stat.avgReturnHold >= 0 ? '+' : ''}${stat.avgReturnHold.toFixed(2)}%` }}
+              </span>
+              · {{ BROAD_BACKTEST_LABEL.winRate }}：
+              <span class="tabular-nums text-text-secondary">
+                {{ stat.winRate === null ? '—' : `${stat.winRate.toFixed(0)}%` }}
+              </span>
+            </p>
+          </div>
+        </div>
+        <p class="mt-3 text-xs leading-relaxed text-text-tertiary">{{ BROAD_BACKTEST_NOTE }}</p>
+      </component>
+
+      <!-- 逐只 ETF 份额明细 -->
+      <component :is="deps.ui.Card" :title="BROAD_SHARE_TABLE_TITLE">
+        <component
+          :is="deps.ui.Table"
+          :columns="shareColumns"
+          :rows="shareRows"
+          row-key="code"
+          :min-width="shareMinWidth"
+        >
+          <template #name="{ row }">
+            <span class="flex items-center gap-1.5">
+              <span class="text-text">{{ row.name }}</span>
+              <span class="tabular-nums text-[11px] text-text-tertiary">{{ row.code }}</span>
+            </span>
+          </template>
+          <template #index="{ row }">
+            <span class="rounded bg-flat-weak px-1 py-0.5 text-[10px] text-text-tertiary">
+              {{ row.indexName }}
+            </span>
+          </template>
+          <template #shares="{ row }">
+            <span class="tabular-nums text-text">
+              {{ row.sharesYi === null ? BROAD_PLACEHOLDER : row.sharesYi.toFixed(2) }}
+            </span>
+          </template>
+          <template #delta="{ row }">
+            <span class="tabular-nums" :class="trendClass(row.deltaYi)">
+              {{ row.deltaYi === null ? BROAD_PLACEHOLDER : `${row.deltaYi >= 0 ? '+' : ''}${row.deltaYi.toFixed(2)}` }}
+            </span>
+          </template>
+          <template #flow="{ row }">
+            <span class="tabular-nums" :class="trendClass(row.amountYi)">
+              {{ row.amountYi === null ? BROAD_PLACEHOLDER : `${row.amountYi >= 0 ? '+' : ''}${row.amountYi.toFixed(0)}` }}
+            </span>
+          </template>
+          <template #price="{ row }">
+            <span class="tabular-nums text-text-secondary">
+              {{ row.price === null ? BROAD_PLACEHOLDER : row.price.toFixed(3) }}
+            </span>
+          </template>
+          <template #recent="{ row }">
+            <span class="tabular-nums" :class="trendClass(row.recentDeltaYi)">
+              {{ row.recentDeltaYi === null ? BROAD_PLACEHOLDER : `${row.recentDeltaYi >= 0 ? '+' : ''}${row.recentDeltaYi.toFixed(2)}` }}
+            </span>
+          </template>
+          <template #source="{ row }">
+            <span class="text-text-tertiary">{{ BROAD_SHARE_SOURCE_LABEL[row.source as 'sse' | 'szse'] }}</span>
+          </template>
+        </component>
+        <p class="mt-2 text-xs text-text-tertiary">
+          单位：亿份 / 亿元；份额来自交易所官方逐日披露（沪市单日全市场，深市按代码区间）。
+        </p>
+      </component>
+    </template>
 
     <template v-if="hasDaily">
       <!-- 宽基指数行情 -->

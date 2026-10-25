@@ -24,7 +24,7 @@ import type { BroadDeps } from './types';
 export const broadTrackPlugin: PluginDefinition = {
   id: BROAD_PLUGIN_ID,
   name: '宽基跟踪',
-  version: '1.0.0',
+  version: '1.1.0',
   description:
     '左侧导航新增「宽基跟踪」看板：跟踪宽基 ETF 的流入流出（日频主力资金流 + 季频份额申赎 + 半年频持有人结构），'
     + '以披露锚点 + 净申购分摊预估国家队持仓，按「大跌 + 资金流入 + 成交异动」等形态推定其操作；'

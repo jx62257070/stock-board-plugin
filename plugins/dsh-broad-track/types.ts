@@ -32,6 +32,115 @@ export interface BroadDeps {
   ui: UiKitService;
 }
 
+/**
+ * 一只 ETF 在一个交易日的**份额**行（落库 `etf_share_daily`）
+ *
+ * 这是本插件观测「国家队操作」的主口径：份额变动 = 真实申赎，
+ * 与二级市场资金流（谁在买卖）不同。
+ */
+export interface EtfShareRow {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 6 位裸代码 */
+  code: string;
+  /** 期末总份额（亿份） */
+  sharesYi: number;
+  /** 较上一有数据交易日的份额变动（亿份；正 = 净申购） */
+  deltaYi: number;
+  /** 当日收盘价（元；缺失为 null） */
+  price: number | null;
+  /** 估算净申赎金额（亿元 = deltaYi × price；价格缺失为 null） */
+  amountYi: number | null;
+  /** 数据来源标记（上交所 / 深交所） */
+  source: ShareSource;
+}
+
+/** 份额数据来源 */
+export type ShareSource = 'sse' | 'szse';
+
+/**
+ * 组合（宽基口径合计）的一个交易日份额快照
+ *
+ * 组合份额 = 清单内全部 ETF 的份额之和；组合等权指数 = 各 ETF 收盘价等权平均。
+ */
+export interface ComboSharePoint {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 组合总份额（亿份） */
+  totalSharesYi: number;
+  /** 组合份额日变动（亿份；正 = 净申购） */
+  deltaSharesYi: number;
+  /** 组合估算净申赎金额（亿元；价格缺失为 null） */
+  netFlowYi: number | null;
+  /** 组合等权平均收盘价（元；缺失为 null） */
+  avgPrice: number | null;
+  /** 参与合计的 ETF 只数 */
+  memberCount: number;
+}
+
+/** 份额口径的信号档位 */
+export type ShareSignalLevel = 'none' | 'enter' | 'exit';
+
+/**
+ * 一个交易日的份额口径信号（现算不落库）
+ */
+export interface ShareSignalDay {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 组合总份额（亿份） */
+  totalSharesYi: number;
+  /** 当日份额变动（亿份） */
+  deltaSharesYi: number;
+  /** 当日估算净申赎金额（亿元；缺失为 null） */
+  netFlowYi: number | null;
+  /** 组合等权指数（点位；缺失为 null） */
+  indexLevel: number | null;
+  /** 指数在回测窗口内的历史分位（0-1；缺失为 null） */
+  indexPercentile: number | null;
+  /** 截至当日的连续净增 / 净减天数（正数 = 连续净增） */
+  changeStreak: number;
+  /** 信号档位 */
+  level: ShareSignalLevel;
+  /** 触发依据（人类可读） */
+  evidences: string[];
+}
+
+/**
+ * 历史回测的一段评估（现算不落库）
+ *
+ * 评估对象是「份额口径信号」：信号出现后的持有期收益 vs 基准。
+ */
+export interface ShareBacktestStat {
+  /** 信号档位 */
+  level: ShareSignalLevel;
+  /** 信号出现次数 */
+  count: number;
+  /** 信号出现后第 1 日的平均收益（%） */
+  avgReturn1d: number | null;
+  /** 信号出现后第 N 日（持有期）的平均收益（%） */
+  avgReturnHold: number | null;
+  /** 持有期内上涨的次数 */
+  winCount: number;
+  /** 持有期收益率（%） */
+  winRate: number | null;
+  /** 样本明细（信号日期 + 后续收益） */
+  samples: ShareBacktestSample[];
+}
+
+/** 回测的一条样本 */
+export interface ShareBacktestSample {
+  /** 信号日期（YYYY-MM-DD） */
+  date: string;
+  /** 信号档位 */
+  level: ShareSignalLevel;
+  /** 信号后第 1 日收益（%） */
+  return1d: number | null;
+  /** 信号后第 N 日收益（%） */
+  returnHold: number | null;
+  /** 信号时的指数点位 */
+  indexLevel: number | null;
+}
+
 /** ulist 批量行情的一行（ETF 或指数） */
 export interface QuoteRow {
   /** 代码（ETF 为 6 位裸码，指数为 000300 形态） */
@@ -122,6 +231,12 @@ export interface BroadMeta {
   warnings: string[];
   /** 最近一次刷新拿到的指数快照（页头展示；未刷新为空数组） */
   indexQuotes: QuoteRow[];
+  /** 份额序列同步完成时间（毫秒时间戳；从未同步为 null） */
+  shareSyncedAt: number | null;
+  /** 份额序列已覆盖的最早日期（YYYY-MM-DD；未同步为空串） */
+  shareEarliestDate: string;
+  /** 份额序列已覆盖的最新日期（YYYY-MM-DD；未同步为空串） */
+  shareLatestDate: string;
 }
 
 /** 一只 ETF 的国家队持仓预估（展示口径，现算不落库） */
@@ -194,6 +309,10 @@ export interface BroadSnapshot {
   dailyByCode: Map<string, EtfDailyRow[]>;
   /** 有日频数据的日期集合（升序） */
   dailyDates: string[];
+  /** 代码 → 份额行（升序） */
+  sharesByCode: Map<string, EtfShareRow[]>;
+  /** 份额数据的日期集合（升序） */
+  shareDates: string[];
   /** 代码 → 季度行（按期降序） */
   quartersByCode: Map<string, EtfQuarterRow[]>;
   /** 代码 → 持有人结构行（按期降序） */

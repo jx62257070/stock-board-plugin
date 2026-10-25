@@ -8,7 +8,7 @@
  * 2. **季频**：定期报告披露的份额申赎（期间申购 / 赎回 / 期末总份额）；
  * 3. **半年频**：持有人结构（机构持有比例）佐证。
  *
- * 数据源（2026-10-24 本机实测，证据见 README「数据源与口径」）：
+ * 数据源（2026-10-25 本机实测，证据见 README「数据源与口径」）：
  * - 行情快照（ETF / 指数）：`push2delay.eastmoney.com/api/qt/ulist.np/get`；
  * - ETF 每日资金流：`push2delay.eastmoney.com/api/qt/stock/fflow/daykline/get`
  *   （klines 行 = 日期,主力,小单,中单,大单,超大单,五路净占比,收盘价,涨跌幅,0,0）；
@@ -16,9 +16,26 @@
  *   （⚠️ mode 参数必须带：0 = 份额规模变动，1 = 净资产规模变动）；
  * - 半年度持有人结构：同接口 `type=cyrjg`。
  *
- * ⚠️ 本机出口封禁 push2 / push2his 域（宿主 `eastmoney-reroute.ts` 有记录），
- * K 线类接口在 push2delay 上不可用，故本插件不用东财 K 线；价格与涨跌幅
- * 从资金流接口的收盘价 / 涨跌幅字段拿（f62 / f63），不引入第二条价格链。
+ * ⚠️ **多源降级链（2026-10-25 新增，务必先读）**
+ *
+ * 本机出口会**整域**掐断东财行情域（`push2` / `push2delay` / `push2his` 及其
+ * 数字镜像在 TCP 层被 RST，表现为 `fetch failed` / `other side closed`，
+ * **不是 HTTP 错误码**）。2026-10-25 凌晨实测：8 个域 × 2 条路径共 16 次探测，
+ * 全部断连；同刻 `fundf10` / 新浪 / 腾讯 / `datacenter-web` 全部 200。
+ *
+ * 因此日频取数**不再单点依赖东财行情域**，而是「主源 → 降级源」两段式：
+ * - 行情快照：东财 `ulist` →（失败）宿主 `app:quotes`（腾讯源，宿主已处理 GBK 转码）；
+ * - 每日资金流：东财 `push2his` `fflow` →（失败）东财 `push2delay` `fflow`
+ *   →（失败）新浪 `MoneyFlow.ssl_qsfx_zjlrqs`（**只给主力 + 超大单两档**）。
+ *
+ * ⚠️ 降级到新浪资金流时**只有主力与超大单两档**，小单 / 中单 / 大单为 `null`
+ * （留空而不是当 0 用 —— 见 `em-parse.ts` 数值口径纪律）。信号引擎只用主力口径，
+ * 故降级后信号判定仍成立。
+ *
+ * ⚠️ 资金流历史条数：宿主 `SERVER_API.md` 记录（2026-09-18 实测）——
+ * **同参数下 `push2his` 返回 121 条（自 2026-03-27 起），`push2delay` 只回当日 1 条**
+ * （`lmt=0` 也一样）。故资金流主源取 `push2his`，`push2delay` 降级仅作兜底
+ * （此时历史只有 1 天，页面时间线会很短，但口径与主源一致）。
  *
  * ⚠️ 宿主能力（网络请求与限速节拍）**不由本模块 import**，而是以 `deps` 形式
  * 沿调用链注入：本插件最终以单文件产物分发，运行时拿不到任何宿主模块。
@@ -82,14 +99,24 @@ export const TRACKED_ETFS: readonly TrackedEtf[] = [
   { code: '159952', name: '创业板ETF广发', indexName: '创业板指', market: '0' },
 ];
 
-/** 被跟踪的宽基指数（东财 secid 形态；顺序即展示顺序） */
-export const TRACKED_INDICES: readonly { secid: string; code: string; name: string }[] = [
-  { secid: '1.000300', code: '000300', name: '沪深300' },
-  { secid: '1.000016', code: '000016', name: '上证50' },
-  { secid: '1.000905', code: '000905', name: '中证500' },
-  { secid: '1.000852', code: '000852', name: '中证1000' },
-  { secid: '0.399006', code: '399006', name: '创业板指' },
-  { secid: '1.000688', code: '000688', name: '科创50' },
+/**
+ * 被跟踪的宽基指数（东财 secid 形态；顺序即展示顺序）
+ *
+ * `sinaSymbol` 是同一条指数的新浪符号（降级源用）：沪深 / 上证系列走 `sh`，
+ * 深证系列（创业板指 399006）走 `sz`。
+ */
+export const TRACKED_INDICES: readonly {
+  secid: string;
+  code: string;
+  name: string;
+  sinaSymbol: string;
+}[] = [
+  { secid: '1.000300', code: '000300', name: '沪深300', sinaSymbol: 'sh000300' },
+  { secid: '1.000016', code: '000016', name: '上证50', sinaSymbol: 'sh000016' },
+  { secid: '1.000905', code: '000905', name: '中证500', sinaSymbol: 'sh000905' },
+  { secid: '1.000852', code: '000852', name: '中证1000', sinaSymbol: 'sh000852' },
+  { secid: '0.399006', code: '399006', name: '创业板指', sinaSymbol: 'sz399006' },
+  { secid: '1.000688', code: '000688', name: '科创50', sinaSymbol: 'sh000688' },
 ];
 
 /**
@@ -100,9 +127,11 @@ export const TRACKED_INDICES: readonly { secid: string; code: string; name: stri
 export const etfSecid = (etf: TrackedEtf): string => `${etf.market}.${etf.code}`;
 
 /**
- * 代码 → 新浪 K 线代码（`sh510300` / `sz159915`）
+ * 代码 → 新浪符号（`sh510300` / `sz159915`）
+ *
+ * 同一符号同时用于新浪日 K 与新浪资金流（两个接口同用一套符号）。
  * @param etf 被跟踪的 ETF
- * @returns 新浪代码
+ * @returns 新浪符号
  */
 export const etfSinaSymbol = (etf: TrackedEtf): string =>
   `${etf.market === '1' ? 'sh' : 'sz'}${etf.code}`;
@@ -111,6 +140,146 @@ export const etfSinaSymbol = (etf: TrackedEtf): string =>
 export const ETF_BY_CODE = new Map<string, TrackedEtf>(
   TRACKED_ETFS.map((etf) => [etf.code, etf]),
 );
+
+// ---------- 份额序列数据源（国家队观测的主口径） ----------
+
+/**
+ * 上交所逐日 ETF 份额（单日全市场，一次请求拿全部沪市 ETF）
+ *
+ * `STAT_DATE` 传日期即可回溯历史（实测 2024-02-05 有数据）。
+ * 上游对**无 cookie / 无 Referer** 的请求会返回空体，故必须带 Referer。
+ *
+ * ⚠️ 白名单：`query.sse.com.cn` / `www.sse.com.cn` 需在宿主
+ * `STOCK_PROXY_ALLOWED_HOSTS` 与 Tauri capabilities 内放行（见 README）。
+ */
+export const SSE_SHARE_URL =
+  'https://query.sse.com.cn/commonQuery.do'
+  + '?isPagination=true&pageHelp.pageSize=10000&pageHelp.pageNo=1'
+  + '&pageHelp.beginPage=1&pageHelp.cacheSize=1&pageHelp.endPage=1'
+  + '&sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L&STAT_DATE={date}';
+
+/** 上交所请求 Referer */
+export const SSE_SHARE_REFERER = 'https://www.sse.com.cn/';
+
+/** 上交所份额接口的日期占位符 */
+export const SSE_SHARE_DATE_TOKEN = '{date}';
+
+/**
+ * 深交所逐日份额历史（`fund_jjgm`，按代码 + 日期区间）
+ *
+ * 单个区间上限约 110 个交易日，调用方需分窗（见 `share-data.ts` 的分窗逻辑）。
+ * ⚠️ 该域实测偶发整域断连（连首页都不通），需重试 + 降级。
+ */
+export const SZSE_SHARE_URL =
+  'https://fund.szse.cn/api/report/ShowReport/data'
+  + '?SHOWTYPE=JSON&CATALOGID=fund_jjgm&TABKEY=tab1&txtDm={code}'
+  + '&txtStart={start}&txtEnd={end}&PAGENO={page}';
+
+/** 深交所份额接口 Referer */
+export const SZSE_SHARE_REFERER = 'https://fund.szse.cn/';
+
+/** 深交所份额接口占位符 */
+export const SZSE_SHARE_CODE_TOKEN = '{code}';
+/** 深交所份额接口占位符（起始日） */
+export const SZSE_SHARE_START_TOKEN = '{start}';
+/** 深交所份额接口占位符（结束日） */
+export const SZSE_SHARE_END_TOKEN = '{end}';
+/** 深交所份额接口占位符（页码） */
+export const SZSE_SHARE_PAGE_TOKEN = '{page}';
+
+/** 深交所单窗口最大天数（上游限制约 110 个交易日，留余量取 100 天） */
+export const SZSE_SHARE_WINDOW_DAYS = 100;
+
+/**
+ * 腾讯历史日 K（收盘价；份额折算金额需要它）
+ *
+ * 显式日期区间形态：`param=<symbol>,day,<开始>,<结束>,<条数>`。
+ *
+ * ⚠️ **端点必须是 `kline/kline` 而不是 `fqkline/get`**（2026-10-25 实测）：
+ * - `fqkline/get` 已被腾讯 WAF 拦死 —— 任何 Referer / UA 组合都返回 **HTTP 501**
+ *   + 一段 `waf.tencent.com/501page.html` 跳转脚本（不是 JSON，解析器会拿到空数组）；
+ * - `kline/kline`（同域 `web.ifzq.gtimg.cn`）**HTTP 200**，返回键 `day`（不复权），
+ *   实测 `param=sh510300,day,2024-01-01,2026-10-24,800` → **678 行**，覆盖
+ *   2024-01-02 ~ 2026-10-23，正是回测需要的完整窗口。
+ *
+ * ⚠️ **不要带复权参数**（`qfq` / `none`）：
+ * - 带 `qfq` → 该端点只回 `{version:…}`，**没有任何 K 线数组**（行数为 0）；
+ * - 不带 → 回 `day` 键 = **不复权**序列（正是我们要的口径）。
+ *
+ * ⚠️ 符号必须带市场前缀（`sh510300` / `sz159915`），只给 6 位代码会返回空 `data`。
+ *
+ * 份额折算金额用**不复权价**：那才是当日真实成交价与市值。
+ */
+export const TENCENT_KLINE_URL =
+  'https://web.ifzq.gtimg.cn/appstock/app/kline/kline'
+  + '?param={symbol},day,{start},{end},{count}';
+
+/** 腾讯日 K Referer */
+export const TENCENT_KLINE_REFERER = 'https://gu.qq.com/';
+
+/** 腾讯日 K 占位符 */
+export const TENCENT_KLINE_SYMBOL_TOKEN = '{symbol}';
+/** 腾讯日 K 占位符（起始日） */
+export const TENCENT_KLINE_START_TOKEN = '{start}';
+/** 腾讯日 K 占位符（结束日） */
+export const TENCENT_KLINE_END_TOKEN = '{end}';
+/** 腾讯日 K 占位符（条数） */
+export const TENCENT_KLINE_COUNT_TOKEN = '{count}';
+
+/** 交易所域请求间隔（毫秒）—— 交易所对高频请求会掐连接 */
+export const EXCHANGE_DELAY_MS = 350;
+
+/** 交易所域重试次数 */
+export const EXCHANGE_FETCH_ATTEMPTS = 3;
+
+/** 交易所域重试间隔（毫秒） */
+export const EXCHANGE_RETRY_DELAY_MS = 1200;
+
+/**
+ * 份额序列回溯起点（2024-01-01）
+ *
+ * 覆盖用户关心的全部历史拐点：2024-02 的 2800 点底部进场、2024-09 的 924 行情、
+ * 2025-04 的关税战护盘、2026-01 的规模减持退场。
+ */
+export const SHARE_HISTORY_START = '2024-01-01';
+
+/** 份额序列保留天数（上游按日全量给，这里只做兜底上限） */
+export const SHARE_HISTORY_MAX_DAYS = 1200;
+
+// ---------- 份额口径信号参数 ----------
+
+/**
+ * 「国家队进场」判定：低位 + 连续净申购
+ *
+ * - 份额连续净增天数 ≥ SIGNAL_ENTER_STREAK；
+ * - 且组合等权指数处于回测窗口内的低位分位（≤ SIGNAL_ENTER_LOW_PCT）；
+ * - 且区间净申购金额 ≥ SIGNAL_ENTER_MIN_AMOUNT（亿元）。
+ */
+export const SIGNAL_ENTER_STREAK = 3;
+
+/** 进场信号的低位分位阈值（0-1；0.35 = 处于历史 35% 分位以下） */
+export const SIGNAL_ENTER_LOW_PCT = 0.35;
+
+/** 进场信号的最小区间净申购金额（亿元） */
+export const SIGNAL_ENTER_MIN_AMOUNT = 20;
+
+/**
+ * 「国家队退场」判定：高位 + 连续净赎回
+ *
+ * - 份额连续净减天数 ≥ SIGNAL_EXIT_STREAK；
+ * - 且组合等权指数处于高位分位（≥ SIGNAL_EXIT_HIGH_PCT）；
+ * - 且区间净赎回金额 ≥ SIGNAL_EXIT_MIN_AMOUNT（亿元，绝对值）。
+ */
+export const SIGNAL_EXIT_STREAK = 3;
+
+/** 退场信号的高位分位阈值（0-1；0.65 = 处于历史 65% 分位以上） */
+export const SIGNAL_EXIT_HIGH_PCT = 0.65;
+
+/** 退场信号的最小区间净赎回金额（亿元，绝对值） */
+export const SIGNAL_EXIT_MIN_AMOUNT = 20;
+
+/** 回测评估的持有期（交易日）—— 信号出现后按此持有期算收益 */
+export const BACKTEST_HOLD_DAYS = 20;
 
 // ---------- 数据源 ----------
 
@@ -130,6 +299,51 @@ export const EM_ULIST_QUERY =
 /** ulist 查询串里 secids 的占位符 */
 export const EM_ULIST_SECIDS_TOKEN = '{secids}';
 
+/**
+ * 新浪批量行情快照（降级源；东财行情域被掐断时接管）
+ *
+ * 一次请求可带多个代码（逗号分隔），单次上限远超本插件的 20 个标的。
+ */
+export const SINA_HQ_URL = 'https://hq.sinajs.cn/list={symbols}';
+
+/** 新浪要求带 Referer，否则返回空体 */
+export const SINA_HQ_REFERER = 'https://finance.sina.com.cn';
+
+/**
+ * 新浪 hq 响应行的字段下标（实测口径，0 起）
+ *
+ * 响应形态：`var hq_str_sh510300="名称,今开,昨收,最新价,最高,最低,买一价,卖一价,
+ * 成交量(股),成交额(元),买一量,买一价,…,日期,时间,状态,…"`。
+ *
+ * 与腾讯源交叉核对（510300 on 2026-10-23）：最新价 4.178 / 昨收 4.107 /
+ * 涨跌幅 1.73% / 成交额 15423238067 元 / 成交量 3755608213 股 —— 全部一致。
+ */
+export const SINA_HQ_FIELD = {
+  /** 名称 */
+  NAME: 0,
+  /** 今开 */
+  OPEN: 1,
+  /** 昨收 */
+  PRE_CLOSE: 2,
+  /** 最新价 */
+  PRICE: 3,
+  /** 最高 */
+  HIGH: 4,
+  /** 最低 */
+  LOW: 5,
+  /** 成交量（股） */
+  VOLUME: 8,
+  /** 成交额（元） */
+  AMOUNT: 9,
+  /** 日期（YYYY-MM-DD） */
+  DATE: 30,
+  /** 时间（HH:mm:ss） */
+  TIME: 31,
+} as const;
+
+/** 新浪 hq 一行的最少字段数（脏行少于该值丢弃） */
+export const SINA_HQ_MIN_FIELDS = 32;
+
 /** ulist 行里各字段的键 */
 export const EM_ULIST_FIELD = {
   /** 代码 */
@@ -146,8 +360,24 @@ export const EM_ULIST_FIELD = {
   PRE_CLOSE: 'f18',
 } as const;
 
-/** ETF 每日资金流日 K（push2delay 实测可用；push2 同款被出口封禁） */
-export const EM_FFLOW_URL = 'https://push2delay.eastmoney.com/api/qt/stock/fflow/daykline/get';
+/**
+ * ETF 每日资金流日 K（主源：push2his）
+ *
+ * ⚠️ **为什么主源是 push2his 而不是 push2delay**：宿主 `SERVER_API.md` 记录
+ * （2026-09-18 实测）—— 同参数下 `push2his` 返回 **121 条**（自 2026-03-27 起），
+ * 而 `push2delay` **只回当日 1 条**（`lmt=0` 也一样）。插件要 30 个交易日的资金流
+ * 历史（近 5 日 / 20 日均值 / 信号时间线都靠它），故必须走 push2his。
+ */
+export const EM_FFLOW_URL = 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get';
+
+/**
+ * ETF 每日资金流日 K（降级源：push2delay）
+ *
+ * 与主源同构同参数，但**历史被截断为当日 1 条** —— 仅作东财域内互备，
+ * 用来在 push2his 被掐而 push2delay 尚通时保住「当天有数」。
+ */
+export const EM_FFLOW_FALLBACK_URL =
+  'https://push2delay.eastmoney.com/api/qt/stock/fflow/daykline/get';
 
 /** 资金流查询串（`{secid}` 由取数层替换） */
 export const EM_FFLOW_QUERY =
@@ -158,6 +388,50 @@ export const EM_FFLOW_SECID_TOKEN = '{secid}';
 
 /** 资金流查询串里 limit 的占位符 */
 export const EM_FFLOW_LIMIT_TOKEN = '{limit}';
+
+/**
+ * 新浪个股资金流历史（**二级降级源**：东财行情域整域不可达时接管）
+ *
+ * 路径 `MoneyFlow.ssl_qsfx_zjlrqs`，按 `daima`（新浪符号，如 `sh510300`）查。
+ * 响应是 JSON 数组，每行字段（实测口径）：
+ * - `opendate`：日期（YYYY-MM-DD）
+ * - `trade`：收盘价
+ * - `changeratio`：涨跌幅（**小数**，需 ×100 换成百分数）
+ * - `netamount`：**主力净流入（元）**
+ * - `r0_net`：**超大单净流入（元）**
+ * - `ratioamount` / `r0_ratio`：主力 / 超大单的净流入占成交额比（小数）
+ *
+ * ⚠️ **口径边界（重要）**：新浪该接口**只给主力与超大单两档**，
+ * 没有小单 / 中单 / 大单分档 → 降级时这三档留 `null`（不当 0 用）。
+ * 另注：新浪的 `netamount` 与东财的「主力净额」**不是同一套口径**
+ * （实测 510300 on 2026-10-23：新浪 netamount 13.09 亿 vs 东财主力 0.61 亿，
+ * 量级差 ~21 倍），故降级数据与东财数据**不可混作同一时间序列比较**，
+ * README 已标注该口径断点。
+ */
+export const SINA_MONEYFLOW_URL =
+  'https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs';
+
+/** 新浪资金流查询串（`{symbol}` 由取数层替换为新浪符号；`{limit}` 为条数） */
+export const SINA_MONEYFLOW_QUERY = 'page=1&num={limit}&sort=opendate&asc=0&daima={symbol}';
+
+/** 新浪资金流查询串占位符 */
+export const SINA_MONEYFLOW_SYMBOL_TOKEN = '{symbol}';
+export const SINA_MONEYFLOW_LIMIT_TOKEN = '{limit}';
+
+/** 新浪资金流行里的字段名（实测口径） */
+export const SINA_MONEYFLOW_FIELD = {
+  /** 日期 */
+  DATE: 'opendate',
+  /** 收盘价 */
+  CLOSE: 'trade',
+  /** 涨跌幅（小数） */
+  CHANGE_PERCENT: 'changeratio',
+  /** 主力净流入（元） */
+  MAIN: 'netamount',
+  /** 超大单净流入（元） */
+  SUPER: 'r0_net',
+} as const;
+
 
 /**
  * 资金流 klines 行的字段下标（0 起，实测口径）
@@ -247,8 +521,10 @@ export const EM_F10_CYRJG_FIELD = {
   INST_RATIO: 1,
   /** 个人持有比例（%） */
   PERSON_RATIO: 2,
+  /** 内部持有比例（%） */
+  INTERNAL_RATIO: 3,
   /** 总份额（亿份） */
-  TOTAL_SHARES: 3,
+  TOTAL_SHARES: 4,
 } as const;
 
 /** 持有人结构表一行的最少单元格数 */
@@ -491,8 +767,108 @@ export const BROAD_ANCHOR_COLUMN_LABEL = {
   estAmount: '折合金额（亿元）',
 } as const;
 
+// ---------- 份额口径看板文案 ----------
+
+/** 份额序列卡标题 */
+export const BROAD_SHARE_TITLE = '宽基 ETF 份额序列（国家队主口径）';
+
+/** 份额序列卡的口径说明 */
+export const BROAD_SHARE_NOTE =
+  '份额来自交易所官方逐日披露（上交所单日全市场 / 深交所 fund_jjgm），是**真实申购赎回**，'
+  + '与二级市场资金流（谁在买卖）不同 —— 国家队的大额动作只能在份额上看到。'
+  + '「估算净申赎」= 当日份额变动 × 当日收盘价，全市场口径（含散户与机构），不是国家队专属。';
+
+/** 同步份额按钮文案 */
+export const BROAD_SHARE_SYNC_BUTTON = '同步份额序列';
+
+/** 同步份额失败文案前缀 */
+export const BROAD_SHARE_SYNC_FAILED = '份额同步失败';
+
+/** 同步份额进行中文案 */
+export const BROAD_SHARE_SYNCING = '份额同步中';
+
+/** 份额曲线卡标题 */
+export const BROAD_SHARE_CHART_TITLE = '组合份额走势与每日净申赎';
+
+/** 份额曲线卡的口径说明 */
+export const BROAD_SHARE_CHART_NOTE =
+  '上：组合总份额（亿份，清单内全部 ETF 合计）。下：每日估算净申赎（亿元，正 = 净申购）。'
+  + '指数为固定权重价格指数（基准日 = 100，按各 ETF 基准日份额加权并按基准日价格归一化）。';
+
+/** 信号波段卡标题 */
+export const BROAD_WAVE_TITLE = '国家队进场 / 退场信号（份额口径）';
+
+/** 信号波段卡的口径说明 */
+export const BROAD_WAVE_NOTE =
+  '信号按**方向段**判定：连续同向的份额变动算一段（一次战役 = 一个信号，不是每天一次）。'
+  + '「进场」= 连续净增且累计净申购达标、同时指数处于历史低位；'
+  + '「退场」= 连续净减且累计净赎回达标、同时指数处于历史高位。';
+
+/** 回测面板标题 */
+export const BROAD_BACKTEST_TITLE = '信号回测';
+
+/** 回测面板的口径说明 */
+export const BROAD_BACKTEST_NOTE =
+  '统计口径：每个信号**波段**算一次样本（不按天重复计），收益 = 信号日到 N 个交易日后的组合指数涨跌幅。'
+  + '样本量小、且信号用了全窗口分位（事后视角），仅供研究参考，不构成投资建议。';
+
+/** 回测字段标签 */
+export const BROAD_BACKTEST_LABEL = {
+  count: '信号次数',
+  return1d: '次日平均',
+  returnHold: '持有期平均',
+  winRate: '胜率',
+} as const;
+
+/** 份额明细表标题 */
+export const BROAD_SHARE_TABLE_TITLE = '逐只 ETF 份额明细';
+
+/** 份额明细表列标题 */
+export const BROAD_SHARE_COLUMN_LABEL = {
+  name: 'ETF',
+  index: '跟踪指数',
+  shares: '总份额（亿份）',
+  delta: '当日份额变动（亿份）',
+  flow: '当日估算净申赎（亿元）',
+  price: '收盘价',
+  recent: '近5日份额变动（亿份）',
+  source: '数据源',
+} as const;
+
+/** 数据源展示名 */
+export const BROAD_SHARE_SOURCE_LABEL = {
+  sse: '上交所',
+  szse: '深交所',
+} as const;
+
+/** 份额卡字段标签 */
+export const BROAD_SHARE_SUMMARY_LABEL = {
+  totalShares: '组合总份额',
+  todayFlow: '当日估算净申赎',
+  recentFlow: '近5日净申赎',
+  indexLevel: '组合指数',
+  days: '覆盖交易日',
+} as const;
+
+/** 份额覆盖区间标签 */
+export const BROAD_SHARE_RANGE_LABEL = '份额覆盖区间';
+
+/** 信号档位展示文案 */
+export const SHARE_SIGNAL_LABEL = {
+  none: '无信号',
+  enter: '疑似进场',
+  exit: '疑似退场',
+} as const;
+
+/** 信号档位徽标类名（红涨绿跌：进场 = 红，退场 = 绿） */
+export const SHARE_SIGNAL_BADGE_CLASS = {
+  none: 'bg-surface-secondary text-text-tertiary',
+  enter: 'bg-up-weak text-up',
+  exit: 'bg-down-weak text-down',
+} as const;
+
 /** 免责声明（页脚固定展示） */
 export const BROAD_DISCLAIMER =
-  '本页为资金流痕迹的推定工具，不构成投资建议：国家队无公开每日持仓，「预估持仓」由披露锚点 + 份额申赎分摊推算，'
-  + '与真实持仓必然存在偏差；「操作信号」只是二级市场资金流形态的归类。'
-  + '数据只在点击按钮时请求上游，落本地插件库；季频数据以上游定期报告为准。';
+  '本页为份额变动的推定工具，不构成投资建议：ETF 份额变动是**全市场净申赎**，不是国家队专属持仓；'
+  + '「进场 / 退场」是基于「连续大额申赎 + 指数位置」的形态推定，与真实操作必然存在偏差。'
+  + '数据只在点击按钮时请求上游，落本地插件库；份额来自交易所官方逐日披露。';

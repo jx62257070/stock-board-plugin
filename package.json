@@ -15,6 +15,7 @@
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "lint": "eslint plugins scripts",
     "lint:fix": "eslint plugins scripts --fix",
+    "check:parse": "node scripts/check-broad-track-parse.mjs",
     "prepare": "husky"
   },
   "devDependencies": {
