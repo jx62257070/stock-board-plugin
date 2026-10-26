@@ -825,7 +825,7 @@ const shortDate = (date: string): string => date.slice(5);
                 :class="(bar.value ?? 0) >= 0 ? 'bg-up-weak' : 'bg-down-weak'"
               />
               <span
-                class="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] tabular-nums text-text shadow-sm group-hover:block"
+                class="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-md bg-text px-1.5 py-0.5 text-[10px] tabular-nums text-surface shadow-md group-hover:block"
               >
                 {{ bar.date.slice(5) }} · {{ bar.value === null ? '—' : `${bar.value.toFixed(0)} 亿` }}
               </span>

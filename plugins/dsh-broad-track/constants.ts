@@ -862,7 +862,7 @@ export const SHARE_SIGNAL_LABEL = {
 
 /** 信号档位徽标类名（红涨绿跌：进场 = 红，退场 = 绿） */
 export const SHARE_SIGNAL_BADGE_CLASS = {
-  none: 'bg-surface-secondary text-text-tertiary',
+  none: 'bg-flat-weak text-text-tertiary',
   enter: 'bg-up-weak text-up',
   exit: 'bg-down-weak text-down',
 } as const;
