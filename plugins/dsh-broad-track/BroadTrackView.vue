@@ -1345,10 +1345,16 @@ const shortDate = (date: string): string => date.slice(5);
           <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 78%" />
           <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 86%" />
           <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 93%" />
-          <span class="absolute bottom-0.5 left-1.5 text-[10px] tabular-nums text-text-tertiary">
+          <span
+            class="absolute text-[10px] tabular-nums text-text-tertiary"
+            style="bottom: 2px; left: 6px"
+          >
             {{ shareAxis.first }}
           </span>
-          <span class="absolute bottom-0.5 right-1.5 text-[10px] tabular-nums text-text-tertiary">
+          <span
+            class="absolute text-[10px] tabular-nums text-text-tertiary"
+            style="bottom: 2px; right: 6px"
+          >
             {{ shareAxis.last }}
           </span>
         </div>
