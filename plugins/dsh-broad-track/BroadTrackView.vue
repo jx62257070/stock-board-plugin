@@ -440,22 +440,53 @@ const flowBars = computed(() => {
   }));
 });
 
-/** 信号在曲线上的标记位置（X 轴百分比） */
+/** 信号在曲线上的标记（X 轴百分比 + 悬停要展示的波段摘要） */
 const waveMarkers = computed(() => {
   const list = comboSeries.value;
   if (list.length === 0) return [];
   const indexByDate = new Map(list.map((point, index) => [point.date, index]));
-  const marks: { date: string; level: 'enter' | 'exit'; left: number }[] = [];
+  const marks: {
+    date: string;
+    level: 'enter' | 'exit';
+    left: number;
+    streak: number;
+    flowText: string;
+  }[] = [];
   for (const wave of shareWaves.value) {
     if (wave.level === 'none') continue;
     const index = indexByDate.get(wave.date);
     if (index === undefined) continue;
+    // 悬停摘要：优先净申赎金额（亿元），金额缺失时退回份额变动（亿份）
+    const flowText =
+      wave.netFlowYi === null
+        ? `${wave.deltaSharesYi >= 0 ? '+' : ''}${wave.deltaSharesYi.toFixed(1)} 亿份`
+        : `${wave.netFlowYi >= 0 ? '+' : ''}${wave.netFlowYi.toFixed(0)} 亿元`;
     marks.push({
       date: wave.date,
       level: wave.level,
       left: (index / (list.length - 1)) * 100,
+      streak: Math.abs(wave.streak),
+      flowText,
     });
   }
+  return marks;
+});
+
+/** 曲线上的年份刻度（每年首个交易日的位置），让时间轴一眼能读 */
+const shareYearMarks = computed(() => {
+  const list = comboSeries.value;
+  if (list.length === 0) return [];
+  const marks: { year: string; left: number }[] = [];
+  let currentYear = '';
+  list.forEach((point, index) => {
+    const year = point.date.slice(0, 4);
+    if (year === currentYear) return;
+    currentYear = year;
+    marks.push({
+      year,
+      left: list.length > 1 ? (index / (list.length - 1)) * 100 : 0,
+    });
+  });
   return marks;
 });
 
@@ -792,7 +823,7 @@ const shortDate = (date: string): string => date.slice(5);
           </div>
         </div>
 
-        <!-- 份额曲线（SVG 折线） -->
+        <!-- 份额曲线（SVG 折线）+ 年份刻度 + 信号标记 -->
         <div class="mt-4">
           <div class="relative h-24 w-full">
             <svg
@@ -811,20 +842,47 @@ const shortDate = (date: string): string => date.slice(5);
                 class="text-primary"
               />
             </svg>
-            <!-- 信号标记 -->
+            <!-- 年份分隔线（背景层，弱化） -->
             <span
+              v-for="mark in shareYearMarks"
+              :key="`year-${mark.year}`"
+              class="absolute top-0 h-full bg-flat-weak"
+              :style="{ left: `${mark.left}%`, width: '1px', opacity: 0.5 }"
+            />
+            <!-- 信号标记：加宽命中区 + 悬停富提示（日期 / 类型 / 连续天数 / 累计净申赎） -->
+            <div
               v-for="mark in waveMarkers"
               :key="`${mark.date}-${mark.level}`"
-              class="absolute top-0 h-full w-0.5 -translate-x-1/2"
-              :class="mark.level === 'enter' ? 'bg-up' : 'bg-down'"
-              :style="{ left: `${mark.left}%` }"
-              :title="`${mark.date} ${SHARE_SIGNAL_LABEL[mark.level]}`"
-            />
+              class="group absolute top-0 h-full"
+              :style="{ left: `${mark.left}%`, width: '10px', transform: 'translateX(-50%)' }"
+            >
+              <span
+                class="absolute left-1/2 top-0 h-full w-0.5 -translate-x-1/2"
+                :class="mark.level === 'enter' ? 'bg-up' : 'bg-down'"
+              />
+              <span
+                class="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-md bg-text px-1.5 py-0.5 text-[10px] tabular-nums text-surface shadow-md group-hover:block"
+              >
+                <span class="block">{{ mark.date }} {{ SHARE_SIGNAL_LABEL[mark.level] }}</span>
+                <span class="block">连续 {{ mark.streak }} 天 · 累计净申赎 {{ mark.flowText }}</span>
+              </span>
+            </div>
           </div>
-          <div class="mt-1 flex justify-between text-[10px] tabular-nums text-text-tertiary">
-            <span>{{ shareAxis.first }}</span>
-            <span>{{ shareAxis.middle }}</span>
-            <span>{{ shareAxis.last }}</span>
+          <!-- 年份标签（按真实年份位置；首尾贴边避免裁切） -->
+          <div class="relative mt-1 h-4">
+            <span
+              v-for="(mark, index) in shareYearMarks"
+              :key="mark.year"
+              class="absolute top-0 text-[10px] tabular-nums text-text-tertiary"
+              :style="{
+                left: `${mark.left}%`,
+                transform: index === 0
+                  ? 'none'
+                  : index === shareYearMarks.length - 1
+                    ? 'translateX(-100%)'
+                    : 'translateX(-50%)',
+              }"
+            >{{ mark.year }}</span>
           </div>
         </div>
 
