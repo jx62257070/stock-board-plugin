@@ -10,6 +10,7 @@ import {
   WATCH_ALERT_TONE,
   WATCH_ALERT_TONE_LABEL_CLASS,
   WATCH_EMPTY_HINT,
+  WATCH_HEADER_COLLAPSED_STORAGE_KEY,
   WATCH_SKELETON_ROWS,
   WATCHLIST_ROUTE_PATH,
 } from './constants';
@@ -126,6 +127,80 @@ const rows = computed<WatchRow[]>(() =>
   }),
 );
 
+// ---------- 按自选分组归组（2.3.0：组头可展开 / 收起，默认全展开，收起记忆落 localStorage） ----------
+
+/** 无法归入任何自选分组的候选落到这个兜底桶（理论不出现：候选 ∩ 自选恒有组） */
+const UNGROUPED_BUCKET_ID = '__ungrouped__';
+
+/** 分组段（组头 + 组内行；一只候选属于多个分组时在每组都出现，与自选股页语义一致） */
+interface WatchRowGroup {
+  /** 分组 id（收起记忆的 key；兜底桶用 UNGROUPED_BUCKET_ID） */
+  id: string;
+  /** 分组名 */
+  name: string;
+  /** 组内行 */
+  rows: WatchRow[];
+}
+
+/** 候选行按自选分组归组：组序跟随自选页分组顺序，空组不渲染 */
+const rowGroups = computed<WatchRowGroup[]>(() => {
+  const result: WatchRowGroup[] = [];
+  const grouped = new Set<string>();
+  for (const group of props.deps.watchlist.groups()) {
+    const groupRows = rows.value.filter((row) =>
+      group.stocks.some((stock) => stock.symbol === row.symbol),
+    );
+    if (groupRows.length === 0) continue;
+    for (const row of groupRows) grouped.add(row.symbol);
+    result.push({ id: group.id, name: group.name, rows: groupRows });
+  }
+  const rest = rows.value.filter((row) => !grouped.has(row.symbol));
+  if (rest.length > 0) result.push({ id: UNGROUPED_BUCKET_ID, name: '未分组', rows: rest });
+  return result;
+});
+
+/**
+ * 从 localStorage 读收起记忆（损坏 / 不可用时回落全展开）
+ * @returns 收起中的分组 id 列表
+ */
+const readCollapsedIds = (): string[] => {
+  try {
+    const raw = localStorage.getItem(WATCH_HEADER_COLLAPSED_STORAGE_KEY);
+    const parsed: unknown = raw === null ? [] : JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+/** 收起中的分组 id 集合（默认全展开） */
+const collapsedIds = ref<Set<string>>(new Set(readCollapsedIds()));
+
+/**
+ * 查询分组是否收起
+ * @param id 分组 id
+ * @returns 是否收起
+ */
+const isGroupCollapsed = (id: string): boolean => collapsedIds.value.has(id);
+
+/**
+ * 切换分组展开 / 收起（记忆落 localStorage，下次打开面板仍保持）
+ * @param id 分组 id
+ */
+const toggleGroup = (id: string): void => {
+  const next = new Set(collapsedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  collapsedIds.value = next;
+  try {
+    localStorage.setItem(WATCH_HEADER_COLLAPSED_STORAGE_KEY, JSON.stringify([...next]));
+  } catch {
+    // 存储不可用（隐私模式等）只影响记忆，不影响本次交互
+  }
+};
+
 /** 正在编辑的行（弹窗标题要用股票名；理论上恒存在，兜底 null） */
 const editingRow = computed(
   () => rows.value.find((row) => row.symbol === editingSymbol.value) ?? null,
@@ -238,58 +313,76 @@ const onOpenWatchlist = (): void => {
       {{ WATCH_EMPTY_HINT }}
     </p>
 
-    <ul v-else class="max-h-[52vh] space-y-0.5 overflow-y-auto">
-      <li v-for="row in rows" :key="row.symbol" class="rounded-md">
-        <div class="group flex items-center gap-0.5 rounded-md hover:bg-flat-weak">
-          <button
-            type="button"
-            class="pressable flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left active:scale-[0.98]"
-            :title="`${row.name} ${row.price} ${row.change}`"
-            @click="onOpenStock(row.symbol)"
-          >
-            <span class="min-w-0 flex-1 truncate text-xs text-text">{{ row.name }}</span>
-            <span class="shrink-0 text-xs tabular-nums text-text-secondary">{{ row.price }}</span>
-            <span class="w-[52px] shrink-0 text-right text-xs tabular-nums" :class="row.trendClass">
-              {{ row.change }}
-            </span>
-          </button>
+    <!-- 按自选分组归组渲染（2.3.0）：组头可展开 / 收起，默认全展开；组序跟随自选页 -->
+    <div v-else class="max-h-[52vh] space-y-1 overflow-y-auto">
+      <div v-for="group in rowGroups" :key="group.id">
+        <button
+          type="button"
+          class="pressable flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-text-tertiary hover:bg-flat-weak hover:text-text"
+          :title="isGroupCollapsed(group.id) ? '展开该分组' : '收起该分组'"
+          @click="toggleGroup(group.id)"
+        >
+          <component
+            :is="deps.ui.Icon"
+            :name="isGroupCollapsed(group.id) ? 'chevronRight' : 'chevronDown'"
+            :size="12"
+          />
+          <span class="min-w-0 truncate">{{ group.name }}</span>
+          <span class="shrink-0 tabular-nums">· {{ group.rows.length }}</span>
+        </button>
+        <ul v-if="!isGroupCollapsed(group.id)" class="space-y-0.5">
+          <li v-for="row in group.rows" :key="row.symbol" class="rounded-md">
+            <div class="group flex items-center gap-0.5 rounded-md hover:bg-flat-weak">
+              <button
+                type="button"
+                class="pressable flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-left active:scale-[0.98]"
+                :title="`${row.name} ${row.price} ${row.change}`"
+                @click="onOpenStock(row.symbol)"
+              >
+                <span class="min-w-0 flex-1 truncate text-xs text-text">{{ row.name }}</span>
+                <span class="shrink-0 text-xs tabular-nums text-text-secondary">{{ row.price }}</span>
+                <span class="w-[52px] shrink-0 text-right text-xs tabular-nums" :class="row.trendClass">
+                  {{ row.change }}
+                </span>
+              </button>
 
-          <!-- 阈值提醒：已设阈值时铃铛按触发方向上色，一眼能看出这只票在等什么；
-               已触发过一次的加一个小点，表示要等价格回到内侧才重新生效 -->
-          <button
-            type="button"
-            class="pressable relative shrink-0 rounded p-0.5 transition-opacity hover:bg-flat-weak active:scale-90"
-            :class="[
-              row.hasAlert
-                ? row.alertClass
-                : 'text-text-tertiary opacity-0 hover:text-text group-hover:opacity-100',
-              editingSymbol === row.symbol ? 'bg-primary-weak text-primary opacity-100' : '',
-            ]"
-            :aria-label="`${row.hasAlert ? WATCH_ALERT_BUTTON_ACTIVE_TITLE : WATCH_ALERT_BUTTON_TITLE} ${row.name}`"
-            :title="row.hasAlert ? `阈值：${row.alertText}${row.fired ? '（已触发，待重新生效）' : ''}` : WATCH_ALERT_BUTTON_TITLE"
-            @click.stop="onToggleEditor(row.symbol)"
-          >
-            <component :is="deps.ui.Icon" name="bell" :size="12" />
-            <span v-if="row.fired" class="absolute right-0 top-0 h-1 w-1 rounded-full bg-current" />
-          </button>
+              <!-- 阈值提醒：铃铛常显（未设阈值时跟随主题文字色：暗色主题白、亮色主题黑），
+                   hover 切主题色；已设阈值的按触发方向上色，一眼能看出这只票在等什么；
+                   已触发过一次的加一个小点，表示要等价格回到内侧才重新生效 -->
+              <button
+                type="button"
+                class="pressable relative shrink-0 rounded p-0.5 transition-colors hover:bg-flat-weak hover:text-primary active:scale-90"
+                :class="[
+                  row.hasAlert ? row.alertClass : 'text-text',
+                  editingSymbol === row.symbol ? 'bg-primary-weak text-primary' : '',
+                ]"
+                :aria-label="`${row.hasAlert ? WATCH_ALERT_BUTTON_ACTIVE_TITLE : WATCH_ALERT_BUTTON_TITLE} ${row.name}`"
+                :title="row.hasAlert ? `阈值：${row.alertText}${row.fired ? '（已触发，待重新生效）' : ''}` : WATCH_ALERT_BUTTON_TITLE"
+                @click.stop="onToggleEditor(row.symbol)"
+              >
+                <component :is="deps.ui.Icon" name="bell" :size="12" />
+                <span v-if="row.fired" class="absolute right-0 top-0 h-1 w-1 rounded-full bg-current" />
+              </button>
 
-          <button
-            type="button"
-            class="pressable shrink-0 rounded p-0.5 text-text-tertiary opacity-0 transition-opacity hover:bg-flat-weak hover:text-text group-hover:opacity-100 active:scale-90"
-            :aria-label="`移出盯盘 ${row.name}`"
-            :title="`移出盯盘 ${row.name}`"
-            @click.stop="onRemoveCandidate(row.symbol)"
-          >
-            <component :is="deps.ui.Icon" name="close" :size="12" />
-          </button>
-        </div>
+              <button
+                type="button"
+                class="pressable shrink-0 rounded p-0.5 text-text-tertiary opacity-0 transition-opacity hover:bg-flat-weak hover:text-text group-hover:opacity-100 active:scale-90"
+                :aria-label="`移出盯盘 ${row.name}`"
+                :title="`移出盯盘 ${row.name}`"
+                @click.stop="onRemoveCandidate(row.symbol)"
+              >
+                <component :is="deps.ui.Icon" name="close" :size="12" />
+              </button>
+            </div>
 
-        <!-- 已设阈值：常显不藏 hover，否则等于没设 -->
-        <p v-if="row.alertText" class="px-2 pb-0.5 text-[10px]" :class="row.alertClass">
-          {{ row.alertText }}
-        </p>
-      </li>
-    </ul>
+            <!-- 已设阈值：常显不藏 hover，否则等于没设 -->
+            <p v-if="row.alertText" class="px-2 pb-0.5 text-[10px]" :class="row.alertClass">
+              {{ row.alertText }}
+            </p>
+          </li>
+        </ul>
+      </div>
+    </div>
 
     <!-- 底部入口：候选从自选股的「盯盘」按钮来，给一条直达路径 -->
     <div class="mt-2 border-t border-flat-weak pt-2">

@@ -26,9 +26,9 @@ export const QUICK_NOTE_PANEL_KEY = `dsh-quick-note#${QUICK_NOTE_PANEL_ID}`;
 export const quickNotePlugin: PluginDefinition = {
   id: 'dsh-quick-note',
   name: '速记',
-  version: '1.1.0',
+  version: '1.2.0',
   description:
-    '左侧栏底部新增「速记」入口（抽屉形态）：随手记一条，随写随存，可关联一只股票（宿主选股弹窗），关联后的速记展示在该股的个股详情里；对外提供 note:repo 服务与 note:saved 事件供其他插件复用。',
+    '左侧栏底部新增「速记」入口（抽屉形态）：随手记一条，随写随存，可关联一只股票（宿主选股弹窗），关联后的速记展示在该股的个股详情里；详情面板底部有悬浮速记条，打开详情即可随手记，不用滚动；对外提供 note:repo 服务与 note:saved 事件供其他插件复用。',
   author: '内置',
   apply: async (ctx) => {
     // 宿主能力一次性取齐后沿调用链注入 —— 单文件产物形态下没有 import 可用，
@@ -92,7 +92,7 @@ export const quickNotePlugin: PluginDefinition = {
       },
     });
 
-    ctx.logger.info('已注册抽屉面板、个股详情速记扩展区、note:repo 服务与 1 条命令');
+    ctx.logger.info('已注册抽屉面板、个股详情速记扩展区（底部悬浮速记条 + 归档列表）、note:repo 服务与 1 条命令');
   },
 };
 

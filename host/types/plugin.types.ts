@@ -13,15 +13,22 @@
  */
 import type * as Vue from 'vue';
 import type { Component, Ref } from 'vue';
-import type { Trend } from '../constants/trend.constants';
-import type { ThemeColor } from '../constants/theme-color.constants';
-import type { TrendTheme } from '../constants/trend-theme.constants';
-import type { BuiltinMcpServer } from '../agent/mcp/types';
-import type { NotifyService } from './notify.types';
-import type { PollingOptions, PollingScheduler } from './polling.types';
-import type { FullQuote, SearchResult } from './stock-quote.types';
-import type { WatchWidgetSettings } from './watch-widget.types';
-import type { HEADER_MARQUEE_TONE, PLUGIN_ORIGIN, PLUGIN_STATUS } from '../constants/plugin.constants';
+import type { Trend } from '../constants/trend.constants.ts';
+import type { ThemeColor } from '../constants/theme-color.constants.ts';
+import type { TrendTheme } from '../constants/trend-theme.constants.ts';
+import type { BuiltinMcpServer } from '../agent/mcp/types.ts';
+import type { NotifyService } from './notify.types.ts';
+import type { PollingOptions, PollingScheduler } from './polling.types.ts';
+import type { FullQuote, SearchResult } from './stock-quote.types.ts';
+import type { WatchWidgetSettings } from './watch-widget.types.ts';
+import type {
+  MarketBoardRow,
+  MarketBoardSource,
+  MarketNewsHeadline,
+  MarketNewsSource,
+  MarketTurnoverSnapshot,
+} from './market-data.types.ts';
+import type { HEADER_MARQUEE_TONE, PLUGIN_ORIGIN, PLUGIN_STATUS } from '../constants/plugin.constants.ts';
 
 /** 可逆副作用句柄：调用 `dispose()` 撤销一次注册（幂等） */
 export interface Disposable {
@@ -112,6 +119,13 @@ export interface MenuItemContribution {
   /** 排序权重，越小越靠前（默认 500，即排在宿主菜单之后） */
   order?: number;
   /**
+   * 侧栏分组 id（缺省归「插件」组，见 `SIDEBAR_MENU_GROUP_DEFAULT`）
+   *
+   * 传宿主内置组 id（`SIDEBAR_MENU_GROUP` 之一）把页面挂进对应组；
+   * 传自定义 id 时侧栏会新增一个分组（标题直接用该 id，组顺序排在末尾）。
+   */
+  group?: string;
+  /**
    * 是否声明为「插件页随插件撤销时的兜底落点」（默认 false）
    *
    * 用户正停在某个插件的页面上、而该插件被关闭 / 卸载 / 挂载失败回滚时，
@@ -132,6 +146,8 @@ export interface RegisteredMenuItem extends MenuItemContribution {
   icon: string;
   /** 排序权重（已补默认值） */
   order: number;
+  /** 侧栏分组 id（已补默认值：缺省归「插件」组） */
+  group: string;
   /** 是否为兜底落点（已补默认值：缺省 false） */
   fallbackLanding: boolean;
 }
@@ -876,12 +892,12 @@ export interface IndustryBoardSnapshot {
  * 指数轻量快照（`app:market` 的 `fetchIndexQuotes` 返回项）
  *
  * 与 `GlobalIndexQuote` 同源（东财 ulist），但只暴露小组件「大盘走势」真正
- * 消费的四个字段；顺序即调用方展示顺序（上证 / 深证 / 创业板指 / 恒生）。
+ * 消费的字段；顺序即调用方展示顺序（A 股 4 个在前、海外 6 个在后）。
  */
 export interface MarketIndexQuote {
   /** 指数代码（上游原值，如 000001 / HSI；仅作渲染 key，不做归一化承诺） */
   code: string;
-  /** 指数名称（上证指数 / 深证成指 / 创业板指 / 恒生指数） */
+  /** 指数名称 */
   name: string;
   /** 最新点位（上游未给时为 null） */
   price: number | null;
@@ -917,11 +933,39 @@ export interface MarketService {
    */
   fetchIndustryBoards: () => Promise<IndustryBoardSnapshot[]>;
   /**
-   * 小组件「大盘走势」的四个指数快照（东财 ulist 单次请求）
-   * @returns 上证指数 / 深证成指 / 创业板指 / 恒生指数（顺序即展示顺序；
+   * 小组件「大盘走势」的指数快照（市场总览同款 10 指数，双源 allSettled）
+   * @returns 指数报价列表（A 股 4 + 海外 6，失败一路自动缺省；
    * 上游对个别 secid 缺数据时该条目不出现，调用方按空态兜底）
    */
   fetchIndexQuotes: () => Promise<MarketIndexQuote[]>;
+}
+
+/**
+ * 市场资讯数据服务（`app:market-data`）
+ *
+ * 盯盘小组件「成交额 / 热点新闻 / 今天炒什么」三个内容视图的取数出口：
+ * 实现层包装宿主已有的 ths-market-analysis / news / hot-board 取数代码并做
+ * 显式字段映射（契约见 types/market-data.types.ts），插件不直接触碰上游接口。
+ * 返回的均为原始数值 / 文案，格式化由调用方自理（或走 `app:format`）。
+ */
+export interface MarketDataService {
+  /**
+   * 实时成交额快照（市场总览「实时成交额」模块同源：同花顺 dq 域）
+   * @returns 快照（分时双线 + 实时 / 环比 / 预测 / 均值）
+   */
+  fetchRealtimeTurnover: () => Promise<MarketTurnoverSnapshot>;
+  /**
+   * 热点新闻标题列表（只标题不带摘要，气泡单行展示口径）
+   * @param source 新闻源（六源分发，见 market-data.constants.ts）
+   * @returns 标题行列表（按源返回顺序，调用方自行截断条数）
+   */
+  fetchHotNews: (source: MarketNewsSource) => Promise<MarketNewsHeadline[]>;
+  /**
+   * 热股榜单行（今天炒什么五平台统一入口，分组取各平台默认榜）
+   * @param source 平台（ths / em / cls / tdx / xq）
+   * @returns 榜单行（按名次升序，A 股口径）
+   */
+  fetchHotBoard: (source: MarketBoardSource) => Promise<MarketBoardRow[]>;
 }
 
 /**
@@ -1201,6 +1245,13 @@ export interface AppServiceMap {
    * 重接口，宿主统一取数口径；只能由用户点击触发。
    */
   'app:market': MarketService;
+  /**
+   * 市场资讯数据（实时成交额 / 热点新闻标题 / 热股榜单）
+   *
+   * 为盯盘小组件的三个内容视图而设，也开放给其他插件复用：
+   * 取数分发与字段映射固定在宿主一侧，源切换由调用方传参。
+   */
+  'app:market-data': MarketDataService;
   /** 格式化与涨跌语义（红涨绿跌、百分比、相对时间、符号互转、限速节拍） */
   'app:format': FormatService;
   /** 市场状态：A 股盘中判定（交易日历 + 分钟级时钟，宿主唯一实现） */
@@ -1276,9 +1327,16 @@ export interface UserPluginRecord {
   /**
    * 安装来源（可选，历史记录没有此字段）
    *
-   * `zip` = 第三方 zip 产物包；`code` = 粘贴 / 选择单文件 JS。仅用于展示与排查。
+   * `zip` = 第三方 zip 产物包；`code` = 粘贴 / 选择单文件 JS；
+   * `update` = 在线更新。仅用于展示与排查。
    */
   source?: string;
+  /**
+   * 在线更新来源直链（可选，历史记录没有此字段）
+   *
+   * 仅用于展示「来自官方插件仓库」与将来多源扩展；**更新匹配靠 id，不靠它**。
+   */
+  updateUrl?: string;
 }
 
 /** 插件运行时信息（插件管理弹窗 / 插件工坊展示） */

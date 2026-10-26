@@ -15,13 +15,16 @@ export const QUICK_NOTE_ASSOCIATED_TITLE = '点击更换关联股票';
 /** 清除关联按钮的 aria 文案 */
 export const QUICK_NOTE_ASSOCIATE_CLEAR_ARIA = '清除关联股票';
 
-/** 详情扩展区：快捷输入占位文案 */
-export const QUICK_NOTE_SECTION_PLACEHOLDER = '给这只股票记一笔…（Ctrl + Enter 保存）';
+/** 悬浮速记条：输入框占位文案 */
+export const QUICK_NOTE_BAR_PLACEHOLDER = '给这只股票记一笔…（Enter 保存，Shift+Enter 换行）';
 
-/** 详情扩展区：无速记空态 */
+/** 悬浮速记条：跳转归档列表按钮文案（`{n}` 会替换成该股速记条数） */
+export const QUICK_NOTE_BAR_ARCHIVE_LINK = '该股已有 {n} 条速记，点此查看 ↓';
+
+/** 详情扩展区（归档列表）：无速记空态 */
 export const QUICK_NOTE_SECTION_EMPTY = '这只股票还没有速记';
 
-/** 详情扩展区：保存按钮文案 */
+/** 悬浮速记条：保存按钮文案 */
 export const QUICK_NOTE_SECTION_SAVE = '记下';
 
 /** 删除速记的 aria 前缀（拼接股票名 / 时间由调用方处理） */

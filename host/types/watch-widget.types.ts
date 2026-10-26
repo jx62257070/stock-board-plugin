@@ -1,11 +1,11 @@
 import type {
   WatchWidgetMode,
   WatchWidgetPower,
-} from '../constants/watch-widget.constants';
-import type { WATCH_WIDGET_POPOVER_VIEW } from '../plugins/watch-widget/constants';
-import type { ThemeColor } from '../constants/theme-color.constants';
-import type { TrendTheme } from '../constants/trend-theme.constants';
-import type { HeaderMarqueeTone } from './plugin.types';
+} from '../constants/watch-widget.constants.ts';
+import type { WATCH_WIDGET_POPOVER_VIEW, WatchWidgetColor } from '../plugins/watch-widget/constants.ts';
+import type { ThemeColor } from '../constants/theme-color.constants.ts';
+import type { TrendTheme } from '../constants/trend-theme.constants.ts';
+import type { HeaderMarqueeTone } from './plugin.types.ts';
 
 /**
  * 任务栏盯盘小组件类型
@@ -24,6 +24,14 @@ export interface WatchWidgetThemePayload {
   trend: TrendTheme;
 }
 
+/**
+ * 阈值类型（与插件 dsh-sidebar-watch 的 `WatchAlertKind` 同字面量：'' = 未设）
+ *
+ * 载荷只带类型 / 方向 / 数值三个用户可编辑字段；`armed` 待触发态由插件盯盘引擎维护，
+ * 不进跨窗口协议。
+ */
+export type WatchWidgetAlertKind = '' | 'price' | 'change';
+
 /** 小组件条上单行展示数据（主窗口推送给小组件窗口的载荷行） */
 export interface WatchWidgetRow {
   /** 完整符号（sh600519） */
@@ -38,6 +46,38 @@ export interface WatchWidgetRow {
   tone: HeaderMarqueeTone;
   /** 阈值已触发待回差（行首提示点） */
   fired: boolean;
+  /** 阈值类型（'' = 未设；气泡据此回显编辑器与铃铛配色） */
+  alertKind: WatchWidgetAlertKind;
+  /** 阈值方向（true = 涨到 / 涨幅达到） */
+  alertAbove: boolean;
+  /** 阈值数值（价格为元、涨跌幅为百分数；未设时 null） */
+  alertValue: number | null;
+  /** 阈值简述文案（主窗口按宿主 `app:format` 造好；未设时空串，铃铛 tooltip 用） */
+  alertText: string;
+  /** 分类颜色（行首圆点；主窗口按持久化的 symbol → 颜色映射补齐，未设置时为白色） */
+  color: WatchWidgetColor;
+}
+
+/** `set-color` 事件载荷（气泡 → 主窗口：设置候选的分类颜色） */
+export interface WatchWidgetColorPayload {
+  /** 完整符号（sh600519） */
+  symbol: string;
+  /** 设置后的颜色（必须是 WATCH_WIDGET_COLOR 的合法取值，主窗口侧会再校验一次） */
+  color: WatchWidgetColor;
+}
+
+/** `set-alert` 事件载荷（气泡 → 主窗口：设置 / 清除候选的阈值提醒） */
+export interface WatchWidgetAlertPayload {
+  /** 完整符号（sh600519；不在候选池里时主窗口忽略） */
+  symbol: string;
+  /** true = 清除该候选的阈值（忽略其余字段；缺省 = 按 kind / above / value 设置） */
+  clear?: boolean;
+  /** 阈值类型（必须是 'price' / 'change'，主窗口侧会再校验一次） */
+  kind?: WatchWidgetAlertKind;
+  /** 比较方向（true = 涨到 / 涨幅达到；缺省按 true 处理） */
+  above?: boolean;
+  /** 阈值数值（必须为正数，主窗口侧会再校验一次） */
+  value?: number | null;
 }
 
 /** 小组件停靠位置（物理像素；用户拖动后由主窗口记忆） */
@@ -98,7 +138,7 @@ export interface WatchWidgetHeatmapPayload {
 export interface WatchWidgetIndexRow {
   /** 指数代码（上游原值，仅作渲染 key） */
   code: string;
-  /** 指数名称（上证指数 / 深证成指 / 创业板指 / 恒生指数） */
+  /** 指数名称 */
   name: string;
   /** 最新点位文案（无报价时 `--`） */
   price: string;
@@ -110,6 +150,87 @@ export interface WatchWidgetIndexRow {
 
 /** `indexes` 事件载荷（主窗口 → 气泡：大盘指数快照） */
 export interface WatchWidgetIndexesPayload {
-  /** 四指数行（空数组 = 暂无数据） */
+  /** 指数行（空数组 = 暂无数据） */
   indexes: WatchWidgetIndexRow[];
+}
+
+/** 成交额视图载荷行（主窗口侧已把「元」换算为格式化文案，气泡只管渲染） */
+export interface WatchWidgetTurnoverRow {
+  /** 字段名（今日实时 / 较上一日 / 预测全天 / 5 日均 / 60 日均 / 较 5 日均） */
+  label: string;
+  /** 数值文案（无数据时 `--`） */
+  value: string;
+  /** 数值语义色：up / down / 空（中性，渲染端映射主题色类） */
+  tone?: HeaderMarqueeTone;
+}
+
+/** `turnover` 事件载荷（主窗口 → 气泡：实时成交额快照） */
+export interface WatchWidgetTurnoverPayload {
+  /** 主行（今日实时成交额文案，大字展示） */
+  headline: string;
+  /** 指标行（较上一日 / 预测全天 / 均值三项，小字网格） */
+  rows: WatchWidgetTurnoverRow[];
+  /** 分时双线（当日累计 vs 昨日同时刻，0-100 归一坐标；null = 点列不足不画） */
+  spark: {
+    /** 当日累计序列（0-100 x 轴均布，y 已按双序列最大值归一） */
+    today: string;
+    /** 昨日同时刻序列 */
+    pre: string;
+  } | null;
+}
+
+/** 新闻视图标题行（主窗口推送；气泡只显示标题，点击经 open-url 打开原文） */
+export interface WatchWidgetNewsItem {
+  /** 标题 */
+  title: string;
+  /** 原文链接（open-url 事件原样带回） */
+  url: string;
+  /** 发布时间文案（如「14:32」；空串 = 不展示） */
+  timeText: string;
+}
+
+/** `news` 事件载荷（主窗口 → 气泡：当前新闻源标题快照） */
+export interface WatchWidgetNewsPayload {
+  /** 当前源（与主窗口取数一致，气泡据此回显 select） */
+  source: string;
+  /** 标题行 */
+  items: WatchWidgetNewsItem[];
+}
+
+/** 热榜视图行（主窗口推送，已按宿主口径造好文案） */
+export interface WatchWidgetBoardRow {
+  /** 完整符号（sh600519 形态；点击经 open-stock 跳详情） */
+  symbol: string;
+  /** 股票名称 */
+  name: string;
+  /** 现价文案（无报价时 `--`） */
+  price: string;
+  /** 涨跌幅文案 */
+  percent: string;
+  /** 涨跌语气 */
+  tone: HeaderMarqueeTone;
+  /** 热度文案（空串 = 该源无热度口径，不展示） */
+  heatLabel: string;
+}
+
+/** `hotboard` 事件载荷（主窗口 → 气泡：当前平台热榜快照） */
+export interface WatchWidgetBoardPayload {
+  /** 当前平台（与主窗口取数一致，气泡据此回显 select） */
+  source: string;
+  /** 榜单行 */
+  rows: WatchWidgetBoardRow[];
+}
+
+/** `view-source` 事件载荷（气泡 → 主窗口：切换新闻源 / 热榜平台） */
+export interface WatchWidgetViewSourcePayload {
+  /** 目标新闻源（缺省 = 不切换） */
+  newsSource?: string;
+  /** 目标热榜平台（缺省 = 不切换） */
+  boardSource?: string;
+}
+
+/** `open-url` 事件载荷（气泡 → 主窗口：用宿主同款窗口逻辑打开原文页） */
+export interface WatchWidgetOpenUrlPayload {
+  /** 原文链接 */
+  url: string;
 }
