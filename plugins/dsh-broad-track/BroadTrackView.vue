@@ -47,6 +47,10 @@ import {
   BROAD_SHARE_CHART_NOTE,
   BROAD_SHARE_CHART_TITLE,
   BROAD_SHARE_COLUMN_LABEL,
+  BROAD_SHARE_HELP_BUTTON,
+  BROAD_SHARE_HELP_LAYERS,
+  BROAD_SHARE_HELP_METRICS,
+  BROAD_SHARE_HELP_TITLE,
   BROAD_SHARE_NOTE,
   BROAD_SHARE_RANGE_LABEL,
   BROAD_SHARE_SOURCE_LABEL,
@@ -124,6 +128,9 @@ const progress = ref<BroadScanProgress | null>(null);
 const notice = ref('');
 /** 锚点编辑弹窗是否打开 */
 const anchorOpen = ref(false);
+
+/** 份额卡「图解」帮助弹窗显隐 */
+const shareHelpOpen = ref(false);
 /** 锚点编辑草稿（打开弹窗时从仓储快照初始化） */
 const anchorDraft = ref<AnchorHolding[]>([]);
 /** 锚点保存是否进行中 */
@@ -713,14 +720,27 @@ const shortDate = (date: string): string => date.slice(5);
       <!-- 份额序列主口径：汇总 + 曲线 + 净申赎柱 -->
       <component :is="deps.ui.Card" :title="BROAD_SHARE_TITLE">
         <template #extra>
-          <component
-            :is="deps.ui.Button"
-            variant="ghost"
-            :disabled="shareSyncing || refreshing || syncing"
-            @click="onSyncShares"
-          >
-            {{ BROAD_SHARE_SYNC_BUTTON }}
-          </component>
+          <div class="flex items-center gap-1">
+            <component
+              :is="deps.ui.Button"
+              variant="ghost"
+              :title="BROAD_SHARE_HELP_BUTTON"
+              @click="shareHelpOpen = true"
+            >
+              <span class="flex items-center gap-1 text-xs">
+                <component :is="deps.ui.Icon" name="info" :size="13" />
+                {{ BROAD_SHARE_HELP_BUTTON }}
+              </span>
+            </component>
+            <component
+              :is="deps.ui.Button"
+              variant="ghost"
+              :disabled="shareSyncing || refreshing || syncing"
+              @click="onSyncShares"
+            >
+              {{ BROAD_SHARE_SYNC_BUTTON }}
+            </component>
+          </div>
         </template>
 
         <!-- 汇总指标 -->
@@ -1300,6 +1320,64 @@ const shortDate = (date: string): string => date.slice(5);
           </component>
         </div>
       </template>
+    </component>
+
+    <!-- 份额卡「图解」帮助弹窗 -->
+    <component
+      :is="deps.ui.Modal"
+      v-model:open="shareHelpOpen"
+      :title="BROAD_SHARE_HELP_TITLE"
+      max-width-class="max-w-xl"
+    >
+      <div class="space-y-4 text-xs leading-relaxed text-text-secondary">
+        <!-- 迷你示意：信号波段标记的形态 -->
+        <div class="relative h-12 w-full overflow-hidden rounded-lg bg-flat-weak">
+          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 3%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 6%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 10%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 15%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 21%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 27%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 33%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 55%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 62%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 70%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 78%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 86%" />
+          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 93%" />
+          <span class="absolute bottom-0.5 left-1.5 text-[10px] tabular-nums text-text-tertiary">
+            {{ shareAxis.first }}
+          </span>
+          <span class="absolute bottom-0.5 right-1.5 text-[10px] tabular-nums text-text-tertiary">
+            {{ shareAxis.last }}
+          </span>
+        </div>
+
+        <!-- 三层结构：从上到下逐层解释 -->
+        <div class="space-y-1.5">
+          <div
+            v-for="layer in BROAD_SHARE_HELP_LAYERS"
+            :key="layer.title"
+            class="rounded-lg border border-flat-weak px-3 py-2"
+          >
+            <p>
+              <span class="font-medium text-text">{{ layer.title }}</span>
+              <span class="ml-2 text-text-tertiary">{{ layer.scope }}</span>
+            </p>
+            <p class="mt-1">{{ layer.answer }}</p>
+          </div>
+        </div>
+
+        <!-- 顶部汇总指标 -->
+        <div class="space-y-1">
+          <p v-for="metric in BROAD_SHARE_HELP_METRICS" :key="metric.label">
+            <span class="font-medium text-text">{{ metric.label }}</span>
+            <span class="ml-1">{{ metric.text }}</span>
+          </p>
+        </div>
+
+        <p class="text-text-tertiary">{{ BROAD_SHARE_NOTE }}</p>
+      </div>
     </component>
   </div>
 </template>
