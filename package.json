@@ -11,6 +11,7 @@
     "build:note": "node scripts/build-plugins.mjs dsh-quick-note",
     "build:watch": "node scripts/build-plugins.mjs dsh-sidebar-watch",
     "build:screener": "node scripts/build-plugins.mjs dsh-stock-screener",
+    "build:csw-active-cap-index": "node scripts/build-plugins.mjs csw-active-cap-index",
     "sync:host": "node scripts/sync-host-contract.mjs",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "lint": "eslint plugins scripts",
