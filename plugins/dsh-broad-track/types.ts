@@ -95,8 +95,8 @@ export interface ShareSignalDay {
   netFlowYi: number | null;
   /** 组合等权指数（点位；缺失为 null） */
   indexLevel: number | null;
-  /** 指数在回测窗口内的历史分位（0-1；缺失为 null） */
-  indexPercentile: number | null;
+  /** 组合指数距前高的回撤（%，≤0；0 = 处于新高；缺失为 null） */
+  drawdownPct: number | null;
   /** 截至当日的连续净增 / 净减天数（正数 = 连续净增） */
   changeStreak: number;
   /** 信号档位 */

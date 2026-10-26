@@ -249,31 +249,38 @@ export const SHARE_HISTORY_MAX_DAYS = 1200;
 // ---------- 份额口径信号参数 ----------
 
 /**
- * 「国家队进场」判定：低位 + 连续净申购
+ * 「国家队进场」判定：深度回调 + 连续净申购
  *
  * - 份额连续净增天数 ≥ SIGNAL_ENTER_STREAK；
- * - 且组合等权指数处于回测窗口内的低位分位（≤ SIGNAL_ENTER_LOW_PCT）；
+ * - 且组合指数距前高回撤达标（≤ SIGNAL_ENTER_DRAWDOWN_PCT，即「从高点跌够了」）；
  * - 且区间净申购金额 ≥ SIGNAL_ENTER_MIN_AMOUNT（亿元）。
  */
 export const SIGNAL_ENTER_STREAK = 3;
 
-/** 进场信号的低位分位阈值（0-1；0.35 = 处于历史 35% 分位以下） */
-export const SIGNAL_ENTER_LOW_PCT = 0.35;
+/**
+ * 进场信号的回撤阈值（%，负数）
+ *
+ * 实测对比（2024-01~2026-10 真实 678 交易日回测）：-8% 档进场 17 次、胜率 63%、
+ * 平均持有收益 +6.79%；旧的全样本分位口径（16 次 / 63% / 6.87%）数字接近，
+ * 但它在逐日判定时用了未来数据（前视），实盘不可复算 —— 回撤口径只用截至当日的
+ * 历史，且回答的是「从高点跌了多少」而不是虚的「历史排名」。
+ */
+export const SIGNAL_ENTER_DRAWDOWN_PCT = -8;
 
 /** 进场信号的最小区间净申购金额（亿元） */
 export const SIGNAL_ENTER_MIN_AMOUNT = 20;
 
 /**
- * 「国家队退场」判定：高位 + 连续净赎回
+ * 「国家队退场」判定：接近前高 + 连续净赎回
  *
  * - 份额连续净减天数 ≥ SIGNAL_EXIT_STREAK；
- * - 且组合等权指数处于高位分位（≥ SIGNAL_EXIT_HIGH_PCT）；
+ * - 且组合指数接近前高（距前高回撤 ≥ SIGNAL_EXIT_NEAR_HIGH_PCT，即「涨到高点附近」）；
  * - 且区间净赎回金额 ≥ SIGNAL_EXIT_MIN_AMOUNT（亿元，绝对值）。
  */
 export const SIGNAL_EXIT_STREAK = 3;
 
-/** 退场信号的高位分位阈值（0-1；0.65 = 处于历史 65% 分位以上） */
-export const SIGNAL_EXIT_HIGH_PCT = 0.65;
+/** 退场信号的「接近前高」阈值（%，负数；-2 = 距前高不足 2%） */
+export const SIGNAL_EXIT_NEAR_HIGH_PCT = -2;
 
 /** 退场信号的最小区间净赎回金额（亿元，绝对值） */
 export const SIGNAL_EXIT_MIN_AMOUNT = 20;
@@ -806,7 +813,7 @@ export const BROAD_SHARE_HELP_LAYERS: { title: string; scope: string; answer: st
     scope: '全历史 · 一波战役一根线',
     answer:
       '哪几波申赎值得注意、信号在哪天触发。连续同向的份额变动归并为一个方向段（份额不变的日子不打断），一段只画一根线。'
-      + '红线 = 进场信号（连续净申购 + 组合指数低位 + 单日规模达标）；绿线 = 退场信号（连续净赎回 + 高位 + 规模达标）。'
+      + '红线 = 进场信号（连续净申购 + 组合指数距前高回落 ≥ 8% + 单日规模达标）；绿线 = 退场信号（连续净赎回 + 指数接近前高 + 规模达标）。'
       + '红色沿用 A 股「红 = 买」的习惯，不是警告。悬停任意一根线可看触发日期。',
   },
   {

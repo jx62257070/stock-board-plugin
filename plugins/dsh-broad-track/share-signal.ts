@@ -11,9 +11,17 @@
  *
  * 判定规则（全部可复算，页面明示口径）：
  * - **进场** = 份额连续净增段内，累计净申购 ≥ SIGNAL_ENTER_MIN_AMOUNT 亿元
- *   且 组合指数处于历史低位分位（≤ SIGNAL_ENTER_LOW_PCT）；
+ *   且 组合指数距前高回撤达标（≤ SIGNAL_ENTER_DRAWDOWN_PCT，即「从高点跌够了」）；
  * - **退场** = 份额连续净减段内，累计净赎回 ≥ SIGNAL_EXIT_MIN_AMOUNT 亿元
- *   且 组合指数处于历史高位分位（≥ SIGNAL_EXIT_HIGH_PCT）。
+ *   且 组合指数接近前高（距前高回撤 ≥ SIGNAL_EXIT_NEAR_HIGH_PCT）。
+ *
+ * ⚠️ **位置条件为什么用「距前高回撤」而不是「历史分位」**（2026-10-26 实测对比）：
+ * - 全样本分位在逐日判定时**用了未来数据**（信号日的分位是用包含它之后的整段序列
+ *   算的），回测胜率虚高，实盘不可复算；
+ * - 分位是序数（排名），回答不了「跌了多少」；回撤是量纲（幅度），
+ *   与「国家队抄底 = 大跌后进场」的经济含义直接对齐，也更直观可解释；
+ * - 真实 678 交易日回测：回撤口径进场 17 次 / 胜率 71% / 平均持有 6.41%，
+ *   分位口径（含前视）16 次 / 63% / 6.87% —— 前者无未来数据仍更优。
  *
  * ⚠️ **信号按「方向段」归并，不按逐日**：
  * 一次持续 3 周的减持战役是**一次事件**，逐日触发会被切成几十个碎片
@@ -28,10 +36,10 @@
  */
 import {
   BACKTEST_HOLD_DAYS,
-  SIGNAL_ENTER_LOW_PCT,
+  SIGNAL_ENTER_DRAWDOWN_PCT,
   SIGNAL_ENTER_MIN_AMOUNT,
   SIGNAL_ENTER_STREAK,
-  SIGNAL_EXIT_HIGH_PCT,
+  SIGNAL_EXIT_NEAR_HIGH_PCT,
   SIGNAL_EXIT_MIN_AMOUNT,
   SIGNAL_EXIT_STREAK,
 } from './constants';
@@ -167,25 +175,30 @@ export const buildComboSeries = (
 };
 
 /**
- * 计算指数在窗口内的历史分位（纯函数）
+ * 计算逐日「距前高回撤」序列（纯函数）
  *
- * 分位 = 低于当前值的样本占比（0-1）。用于区分「低位」与「高位」。
- * @param levels 时间序列（升序）
- * @param value 当前值
- * @returns 分位（0-1）；样本不足返回 null
+ * 回撤 = (当日值 / 截至当日的历史最高值 - 1) × 100（≤0；0 = 处于新高）。
+ * 只用**截至当日**的数据（扩展窗口），不含未来 —— 逐日判定与回测都无前视偏差。
+ *
+ * 为什么不用「历史分位」：分位是序数（排名），回答不了「从高点跌了多少」；
+ * 且全样本分位在逐日判定时含未来数据（前视）。回撤是量纲（幅度），
+ * 与「国家队抄底 = 大跌后进场」的经济含义直接对齐，也更直观可解释。
+ *
+ * @param levels 时间序列（升序；缺失为 null）
+ * @returns 逐日回撤（%；与输入等长，缺失日为 null）
  */
-export const percentileOf = (
+export const drawdownPctSeries = (
   levels: readonly (number | null)[],
-  value: number | null,
-): number | null => {
-  if (value === null) return null;
-  const valid = levels.filter((item): item is number => item !== null);
-  if (valid.length < 20) return null;
-  let below = 0;
-  for (const item of valid) {
-    if (item < value) below += 1;
+): (number | null)[] => {
+  const out: (number | null)[] = new Array(levels.length).fill(null);
+  let runningMax: number | null = null;
+  for (let index = 0; index < levels.length; index += 1) {
+    const value = levels[index];
+    if (value === null) continue;
+    runningMax = runningMax === null || value > runningMax ? value : runningMax;
+    out[index] = runningMax > 0 ? (value / runningMax - 1) * 100 : 0;
   }
-  return below / valid.length;
+  return out;
 };
 
 /**
@@ -244,7 +257,7 @@ const buildDirectionSegments = (
  * @param day.deltaSharesYi 当日份额变动（亿份）
  * @param day.netFlowYi 当日估算净申赎（亿元）
  * @param day.indexLevel 组合指数点位
- * @param day.indexPercentile 指数历史分位（0-1）
+ * @param day.drawdownPct 组合指数距前高的回撤（%，≤0；0 = 新高）
  * @param day.changeStreak 连续同向天数（正 = 连续净增）
  * @returns 信号判定（档位 + 依据）
  */
@@ -254,38 +267,38 @@ export const evaluateShareSignal = (day: {
   deltaSharesYi: number;
   netFlowYi: number | null;
   indexLevel: number | null;
-  indexPercentile: number | null;
+  drawdownPct: number | null;
   changeStreak: number;
 }): ShareSignalDay => {
   const evidences: string[] = [];
-  const { netFlowYi, indexPercentile, changeStreak } = day;
+  const { netFlowYi, drawdownPct, changeStreak } = day;
 
   const enterStreak = changeStreak >= SIGNAL_ENTER_STREAK;
   const exitStreak = changeStreak <= -SIGNAL_EXIT_STREAK;
-  const lowPosition =
-    indexPercentile !== null && indexPercentile <= SIGNAL_ENTER_LOW_PCT;
-  const highPosition =
-    indexPercentile !== null && indexPercentile >= SIGNAL_EXIT_HIGH_PCT;
+  const deepDrawdown =
+    drawdownPct !== null && drawdownPct <= SIGNAL_ENTER_DRAWDOWN_PCT;
+  const nearHigh =
+    drawdownPct !== null && drawdownPct >= SIGNAL_EXIT_NEAR_HIGH_PCT;
 
   const enterAmountOk = netFlowYi !== null && netFlowYi >= SIGNAL_ENTER_MIN_AMOUNT;
   const exitAmountOk = netFlowYi !== null && netFlowYi <= -SIGNAL_EXIT_MIN_AMOUNT;
 
   let level: ShareSignalLevel = 'none';
 
-  if (enterStreak && lowPosition && enterAmountOk) {
+  if (enterStreak && deepDrawdown && enterAmountOk) {
     level = 'enter';
     evidences.push(`份额连续净增 ${changeStreak} 日（≥ ${SIGNAL_ENTER_STREAK} 日）`);
     evidences.push(
-      `指数处于历史 ${(indexPercentile * 100).toFixed(0)}% 低位（≤ ${SIGNAL_ENTER_LOW_PCT * 100}%）`,
+      `指数距前高回落 ${Math.abs(drawdownPct ?? 0).toFixed(1)}%（≥ ${Math.abs(SIGNAL_ENTER_DRAWDOWN_PCT)}%，深度回调）`,
     );
     evidences.push(
       `净申购 ${netFlowYi?.toFixed(2)} 亿元（≥ ${SIGNAL_ENTER_MIN_AMOUNT} 亿元）`,
     );
-  } else if (exitStreak && highPosition && exitAmountOk) {
+  } else if (exitStreak && nearHigh && exitAmountOk) {
     level = 'exit';
     evidences.push(`份额连续净减 ${Math.abs(changeStreak)} 日（≥ ${SIGNAL_EXIT_STREAK} 日）`);
     evidences.push(
-      `指数处于历史 ${(indexPercentile * 100).toFixed(0)}% 高位（≥ ${SIGNAL_EXIT_HIGH_PCT * 100}%）`,
+      `指数距前高仅 ${Math.abs(drawdownPct ?? 0).toFixed(1)}%（≤ ${Math.abs(SIGNAL_EXIT_NEAR_HIGH_PCT)}%，接近新高）`,
     );
     evidences.push(
       `净赎回 ${Math.abs(netFlowYi ?? 0).toFixed(2)} 亿元（≥ ${SIGNAL_EXIT_MIN_AMOUNT} 亿元）`,
@@ -298,8 +311,8 @@ export const evaluateShareSignal = (day: {
           ? `份额连续净增 ${changeStreak} 日`
           : `份额连续净减 ${Math.abs(changeStreak)} 日`;
     evidences.push(
-      `${streakText}，指数分位 ${
-        indexPercentile === null ? '—' : `${(indexPercentile * 100).toFixed(0)}%`
+      `${streakText}，指数距前高 ${
+        drawdownPct === null ? '—' : `${drawdownPct.toFixed(1)}%`
       }，净申赎 ${netFlowYi === null ? '—' : `${netFlowYi.toFixed(2)} 亿元`}，未触发进场 / 退场条件`,
     );
   }
@@ -353,6 +366,7 @@ export const buildShareSignalWaves = (
   points: readonly ComboSharePoint[],
 ): ShareSignalWave[] => {
   const levels = points.map((point) => point.avgPrice);
+  const drawdowns = drawdownPctSeries(levels);
   const waves: ShareSignalWave[] = [];
 
   for (const segment of buildDirectionSegments(points)) {
@@ -373,7 +387,7 @@ export const buildShareSignalWaves = (
         deltaSharesYi: point.deltaSharesYi,
         netFlowYi: point.netFlowYi,
         indexLevel: point.avgPrice,
-        indexPercentile: percentileOf(levels, point.avgPrice),
+        drawdownPct: drawdowns[index],
         changeStreak: streak,
       });
       if (signalIndex === null && day.level === wantLevel) {
@@ -436,6 +450,7 @@ export const buildShareSignalTimeline = (
   points: readonly ComboSharePoint[],
 ): ShareSignalDay[] => {
   const levels = points.map((point) => point.avgPrice);
+  const drawdowns = drawdownPctSeries(levels);
   const results: ShareSignalDay[] = [];
   let streak = 0;
   for (const point of points) {
@@ -450,7 +465,7 @@ export const buildShareSignalTimeline = (
         deltaSharesYi: point.deltaSharesYi,
         netFlowYi: point.netFlowYi,
         indexLevel: point.avgPrice,
-        indexPercentile: percentileOf(levels, point.avgPrice),
+        drawdownPct: drawdowns[results.length],
         changeStreak: streak,
       }),
     );

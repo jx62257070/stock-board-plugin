@@ -84,7 +84,7 @@ const {
   buildComboSeries,
   buildShareSignalWaves,
   runShareBacktest,
-  percentileOf,
+  drawdownPctSeries,
 } = await server.ssrLoadModule('/plugins/dsh-broad-track/share-signal.ts');
 const { addDays } = await server.ssrLoadModule('/plugins/dsh-broad-track/share-data.ts');
 
@@ -459,29 +459,66 @@ assert(
 const waves = buildShareSignalWaves(combo);
 assert(waves.length >= 1, 'buildShareSignalWaves：应至少产出一个波段');
 const exitWave = waves.find((wave) => wave.level === 'exit');
-assert(exitWave !== undefined, 'buildShareSignalWaves：高位连续净减应触发退场波段');
+assert(exitWave !== undefined, 'buildShareSignalWaves：接近前高连续净减应触发退场波段');
 assert(exitWave.streak >= 3, `buildShareSignalWaves：退场波段连续天数应 ≥3（实得 ${exitWave?.streak}）`);
 assert(
   exitWave.netFlowYi !== null && exitWave.netFlowYi < 0,
   'buildShareSignalWaves：退场波段净申赎应为负',
 );
+// ⚠️ 单边上涨序列里**不该**出现进场信号 —— 历史分位口径曾因「全样本分位含未来数据」
+// 在这里误报进场（序列早期在整段范围里排名靠后）；换成回撤口径后前期回撤为 0，
+// 这条反例正好锁死前视偏差的回归。
 const enterWave = waves.find((wave) => wave.level === 'enter');
-assert(enterWave !== undefined, 'buildShareSignalWaves：低位连续净增应触发进场波段');
+assert(enterWave === undefined, 'buildShareSignalWaves：单边上涨序列不应触发进场（防前视偏差回归）');
 
-// 分位计算
-const levels = Array.from({ length: 30 }, (_, i) => 100 + i);
+// ---------- 11b2) 进场信号：深度回调 + 连续净增 ----------
+// 30 个交易日：前 27 日价格上行至新高（份额持平），后 3 日价格回落、份额连续净增
+// → 回撤达标 + 连续净增 + 净申购达标 → 应触发「进场」波段。
+const dipShares = Array.from({ length: 30 }, (_, i) => {
+  const sharesYi = i < 27 ? 1000 : 1000 + (i - 26) * 5;
+  const price = i < 27 ? 10 + i * 0.1 : 12.6 * (1 - (i - 26) * 0.03);
+  return [`2026-02-${String(i + 1).padStart(2, '0')}`, sharesYi, price];
+});
+const dipRows = makeRows('510300', dipShares);
+for (let i = 1; i < dipRows.length; i += 1) {
+  dipRows[i].deltaYi = dipRows[i].sharesYi - dipRows[i - 1].sharesYi;
+  dipRows[i].amountYi = dipRows[i].deltaYi * dipRows[i].price;
+}
+dipRows[0].amountYi = 0;
+const dipCombo = buildComboSeries(new Map([['510300', dipRows]]));
+const dipWaves = buildShareSignalWaves(dipCombo);
+const dipEnter = dipWaves.find((wave) => wave.level === 'enter');
+assert(dipEnter !== undefined, 'buildShareSignalWaves：深度回调 + 连续净增应触发进场波段');
 assert(
-  percentileOf(levels, 100) === 0,
-  'percentileOf：最低值分位应为 0',
+  dipEnter !== undefined && dipEnter.indexReturn !== null && dipEnter.indexReturn < 0,
+  'buildShareSignalWaves：进场波段的段内指数涨跌应为负（回调中进场）',
 );
-// 取最大值本身（129）：严格小于它的有 29 个 → 29/30
+// 第 27~30 日回撤：12.6 → ×0.97/×0.94/×0.91 → 末 3 日依次 -3% / -6% / -9%，
+// 信号日应取段内**首个**满足全部条件的日子（回撤 ≤ -8% + streak ≥3 + 金额 ≥20 亿）。
 assert(
-  Math.abs((percentileOf(levels, 129) ?? 0) - 29 / 30) < 0.01,
-  'percentileOf：最高值分位应接近 1',
+  dipEnter !== undefined && dipEnter.streak >= 3,
+  `buildShareSignalWaves：进场波段连续天数应 ≥3（实得 ${dipEnter?.streak}）`,
 );
-assert(percentileOf([1, 2], 5) === null, 'percentileOf：样本不足应返回 null');
 
-// 回测：波段级统计
+// ---------- 11c) 距前高回撤序列 ----------
+const riseLevels = Array.from({ length: 10 }, (_, i) => 100 + i);
+assert(
+  drawdownPctSeries(riseLevels).every((value) => value === 0),
+  'drawdownPctSeries：单边新高序列回撤应恒为 0',
+);
+const fallLevels = [130, 129, 117];
+const fallDd = drawdownPctSeries(fallLevels);
+assert(
+  fallDd[0] === 0 && Math.abs(fallDd[1] + 100 / 130) < 0.01 && Math.abs(fallDd[2] + 10) < 0.01,
+  `drawdownPctSeries：回落序列回撤应为 0 / -0.77 / -10（实得 ${fallDd.join(',')}）`,
+);
+assert(
+  drawdownPctSeries([null, 100, null, 90])[0] === null
+    && drawdownPctSeries([null, 100, null, 90])[2] === null,
+  'drawdownPctSeries：缺失日应返回 null（不用未来数据填补）',
+);
+
+// 回测：波段级统计（单边上涨序列只有退场信号）
 const stats = runShareBacktest(combo, 5);
 assert(stats.length === 2, 'runShareBacktest：应按进场 / 退场两档产出统计');
 assert(
@@ -489,8 +526,14 @@ assert(
   'runShareBacktest：退场波段应只计 1 次（不按天重复计）',
 );
 assert(
-  stats.find((item) => item.level === 'enter')?.count === 1,
-  'runShareBacktest：进场波段应只计 1 次（不按天重复计）',
+  stats.find((item) => item.level === 'enter')?.count === 0,
+  'runShareBacktest：单边上涨序列不应有进场样本（防前视偏差回归）',
+);
+// 回调序列：进场样本恰好 1 个
+const dipStats = runShareBacktest(dipCombo, 5);
+assert(
+  dipStats.find((item) => item.level === 'enter')?.count === 1,
+  'runShareBacktest：回调序列的进场波段应只计 1 次',
 );
 
 await server.close();

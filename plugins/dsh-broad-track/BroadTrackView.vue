@@ -837,7 +837,7 @@ const shortDate = (date: string): string => date.slice(5);
                 :points="sharePath"
                 fill="none"
                 stroke="currentColor"
-                stroke-width="1.5"
+                stroke-width="2"
                 vector-effect="non-scaling-stroke"
                 class="text-primary"
               />
@@ -862,6 +862,7 @@ const shortDate = (date: string): string => date.slice(5);
               />
               <span
                 class="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-md bg-text px-1.5 py-0.5 text-[10px] tabular-nums text-surface shadow-md group-hover:block"
+                style="z-index: 30"
               >
                 <span class="block">{{ mark.date }} {{ SHARE_SIGNAL_LABEL[mark.level] }}</span>
                 <span class="block">连续 {{ mark.streak }} 天 · 累计净申赎 {{ mark.flowText }}</span>
@@ -900,10 +901,11 @@ const shortDate = (date: string): string => date.slice(5);
             >
               <div
                 class="h-full w-full rounded-t-[1px]"
-                :class="(bar.value ?? 0) >= 0 ? 'bg-up-weak' : 'bg-down-weak'"
+                :class="(bar.value ?? 0) >= 0 ? 'bg-up' : 'bg-down'"
               />
               <span
                 class="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-md bg-text px-1.5 py-0.5 text-[10px] tabular-nums text-surface shadow-md group-hover:block"
+                style="z-index: 30"
               >
                 {{ bar.date.slice(5) }} · {{ bar.value === null ? '—' : `${bar.value.toFixed(0)} 亿` }}
               </span>
