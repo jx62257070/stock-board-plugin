@@ -136,7 +136,7 @@ declare module '../../host/types/plugin.types' {
 
 ### 样式类白名单
 
-应用用 Tailwind，但扫不到这里的插件源码。出包时会把安装包用到的 Tailwind 类汇聚成「样式类白名单」，回写进 WHF 股票看板的 `src/assets/styles/plugin-classes.txt`，由 `@source` 指令引入应用产物 CSS。少了这一步，插件里独有的类名就没有样式。
+应用用 Tailwind，但扫不到这里的插件源码。出包时会把安装包用到的 Tailwind 类汇聚成「样式类白名单」，回写进 WHF 股票看板的 `src/common/assets/styles/plugin-classes.txt`，由 `@source` 指令引入应用产物 CSS。少了这一步，插件里独有的类名就没有样式。
 
 </details>
 

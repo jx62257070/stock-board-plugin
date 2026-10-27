@@ -50,6 +50,7 @@ const TARGETS = [
   { id: 'dsh-dividend-screen', entry: 'plugin.ts' },
   { id: 'dsh-quick-note', entry: 'plugin.ts' },
   { id: 'dsh-sidebar-watch', entry: 'plugin.ts' },
+  { id: 'dsh-broad-track', entry: 'plugin.ts' },
 ];
 
 /** 运行时桥的全局键（与宿主 `src/constants/plugin.constants.ts` 保持一致） */
@@ -65,7 +66,7 @@ const ANY_IMPORT = /^\s*import\s+(?:[^'"\n]*?\bfrom\s+)?['"]([^'"]+)['"]/gm;
  * 解析宿主仓库根目录（可缺省）
  *
  * 找到了就把「产物用到的 Tailwind 类」回写进宿主的样式白名单
- * （`src/assets/styles/plugin-classes.txt`，经 theme.css 的 `@source` 进产物 CSS）；
+ * （`src/common/assets/styles/plugin-classes.txt`，经 theme.css 的 `@source` 进产物 CSS）；
  * 找不到只是跳过这一步 —— 打包本身不依赖宿主。
  * @returns 宿主根目录；不可用时为 null
  */
@@ -234,6 +235,35 @@ const resolveSourceMtime = (srcDir) => {
 };
 
 /**
+ * 清掉 dist 里同一插件的历史版本包（`<id>-<旧版本>.zip`），只保留本次刚写出的产物
+ *
+ * dist 不入库（zip 渠道是 GitHub Release），留旧包只会让「哪个是最新」越来越难认。
+ * 版本段必须以数字开头才算数（`<id>-2.1.0.zip` 命中，撞名的非版本 zip 不误删）。
+ * @param id 插件 id
+ * @param keepFile 本次刚写出的产物路径
+ */
+const removeStaleZips = (id, keepFile) => {
+  const prefix = `${id}-`;
+  const removed = [];
+  for (const name of fs.readdirSync(DIST)) {
+    if (!name.startsWith(prefix) || !name.endsWith('.zip')) continue;
+    if (!/^\d/.test(name.slice(prefix.length, -'.zip'.length))) continue;
+    const full = path.join(DIST, name);
+    if (path.resolve(full) === path.resolve(keepFile)) continue;
+    try {
+      fs.rmSync(full, { force: true });
+      removed.push(name);
+    } catch {
+      // 删除失败无害（个别安全策略会把删除转成回收站操作）：保留旧包不阻塞打包
+      process.stdout.write(`  ！ 旧版本包删除失败（跳过）：${name}\n`);
+    }
+  }
+  if (removed.length > 0) {
+    process.stdout.write(`  清理历史版本包：${removed.join(', ')}\n`);
+  }
+};
+
+/**
  * 打包一个插件
  * @param target 构建目标
  * @param hostRoot 宿主仓库根目录（可为 null）
@@ -268,6 +298,7 @@ const packTarget = async (target, hostRoot) => {
   const outFile = path.join(DIST, `${id}-${manifest.version}.zip`);
   fs.mkdirSync(DIST, { recursive: true });
   fs.writeFileSync(outFile, zipped);
+  removeStaleZips(id, outFile);
 
   const kb = (zipped.byteLength / 1024).toFixed(1);
   process.stdout.write(

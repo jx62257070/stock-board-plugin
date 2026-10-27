@@ -3,7 +3,7 @@ version: alpha
 name: whf-stock-board-plugin-design
 description: >
   插件侧设计规范：插件 UI 运行在 WHF 股票看板内，必须沿用宿主的设计语言（清爽、克制、数据密度优先）。
-  token 单源在宿主的 src/assets/styles/theme.css，插件**不持有样式文件**，只能用宿主已存在的 Tailwind 类名。
+  token 单源在宿主的 src/common/assets/styles/theme.css，插件**不持有样式文件**，只能用宿主已存在的 Tailwind 类名。
   主色湖青 #0e9488 与涨跌语义色隔离；涨跌默认红涨绿跌，四档色阶供文本消费。
   插件产物用到的类名必须进入宿主的样式类白名单，否则宿主 Tailwind 扫不到插件源码，类名会没有样式。
 source: 同步自主 app DESIGN.md（https://github.com/WHF293/whf-stock-board），并做插件侧适配
@@ -111,7 +111,7 @@ spacing:
 这几条是插件与宿主组件的根本差异决定的，**违反会直接表现为线上样式丢失或主题不跟随**：
 
 1. **只能用宿主已有的 Tailwind 类名**。插件不引入 CSS 文件、不写 `<style>` 之外的主题变量；宿主的 Tailwind 扫不到本仓库源码，产物里用到的类名靠**样式类白名单**进入产物 CSS。
-2. **新增类名必须重跑打包并回写白名单**。构建时 `node scripts/build-plugins.mjs --host ../whf-stock-board` 会把产物用到的类写进宿主的 `src/assets/styles/plugin-classes.txt`；只改源码不重跑，新类名在宿主里就是裸类、没有样式。
+2. **新增类名必须重跑打包并回写白名单**。构建时 `node scripts/build-plugins.mjs --host ../whf-stock-board` 会把产物用到的类写进宿主的 `src/common/assets/styles/plugin-classes.txt`；只改源码不重跑，新类名在宿主里就是裸类、没有样式。
 3. **不写死色值**。需要语义色时用 `text-up` / `bg-up-weak` 这类 token 类名，或经 `app:format` 的涨跌色方法取；写死 hex 会导致切换涨跌主题时不跟随。
 4. **明暗模式不自己适配**。宿主用 class 策略（`<html class="dark">`）级联覆盖，插件沿用 token 类名即自动跟随；不要写 `.dark:` 之外的硬编码深色值。
 5. **UI 组件优先用宿主注入的能力**（`app:ui` 的按钮 / 空态 / 弹窗 / 图标等）。插件产物零 `import`，不能引用宿主的 Vue 组件，重复实现一套既不一致又白费。

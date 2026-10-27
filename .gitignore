@@ -14,6 +14,8 @@ plugins-dist/*.zip
 # 本地沉淀（方案、临时脚本、验证输出）
 .ai/
 .readme-rewrite/
+# 临时探针脚本与缓存（一次性验证用，勿入库）
+.tmp-probe/
 
 # 工作区数据（会话记忆等，勿入库）
 .workbuddy/
