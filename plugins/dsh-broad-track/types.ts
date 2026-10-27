@@ -82,6 +82,60 @@ export interface ComboSharePoint {
 export type ShareSignalLevel = 'none' | 'enter' | 'exit';
 
 /**
+ * 国家队操作战役的生命周期状态（一波操作的完整轨迹）
+ *
+ * 观望 → 疑似进场 → 确认进场 → 进场结束 → 持仓观望
+ *      → 疑似退场 → 确认退场 → 退场结束（宽基轻仓/清仓）→ 观望
+ *
+ * - 疑似 = 部分证据（连续同向 2 日，或单日申赎额达确认门槛一半）；
+ * - 确认 = 全部证据（连续天数 + 段内累计金额 + 指数位置，三条件齐）；
+ * - 结束 = 方向段终止（方向反转，或连续静默兜底），同时固化本波战役统计。
+ */
+export type ShareLifecycleState =
+  | 'watching'
+  | 'entry_suspected'
+  | 'entry_confirmed'
+  | 'entry_done'
+  | 'holding'
+  | 'exit_suspected'
+  | 'exit_confirmed'
+  | 'exit_done';
+
+/** 退场完成度档位（按本轮退场累计 ÷ 此前累计进场余额估算，非国家队专属口径） */
+export type ShareExitCompletion = 'partial' | 'light' | 'cleared';
+
+/**
+ * 一波国家队操作战役（方向段级别的完整轨迹）
+ *
+ * 战役 = 一个方向段（连续同向份额变动）。疑似日 / 确认日 / 结束日分别记录，
+ * 结束时固化段内累计净申赎与「估算持仓余额」。
+ */
+export interface ShareCampaignWave {
+  /** 战役方向 */
+  level: Exclude<ShareSignalLevel, 'none'>;
+  /** 段起始日（YYYY-MM-DD） */
+  startDate: string;
+  /** 疑似日（首个部分证据日；全程未触发为 null） */
+  suspectDate: string | null;
+  /** 确认日（全部证据齐备日；未确认为 null） */
+  confirmDate: string | null;
+  /** 结束日（方向反转 / 静默兜底 / 数据末尾） */
+  endDate: string;
+  /** 结束原因：reversal = 方向反转；silent = 连续静默；eof = 数据末尾 */
+  endReason: 'reversal' | 'silent' | 'eof';
+  /** 段内交易日数 */
+  days: number;
+  /** 段内累计净申赎金额（亿元；进场为正、退场为负） */
+  netFlowYi: number;
+  /** 结束后的估算持仓余额（亿元；Σ进场 − Σ退场，含全市场噪音） */
+  balanceYi: number;
+  /** 退场完成度（仅退场战役有；余额占比口径） */
+  exitCompletion: ShareExitCompletion | null;
+  /** 确认依据（确认日当天的证据链；未确认为空） */
+  evidences: string[];
+}
+
+/**
  * 一个交易日的份额口径信号（现算不落库）
  */
 export interface ShareSignalDay {
@@ -101,6 +155,8 @@ export interface ShareSignalDay {
   changeStreak: number;
   /** 信号档位 */
   level: ShareSignalLevel;
+  /** 当日所处的战役生命周期状态 */
+  lifecycle: ShareLifecycleState;
   /** 触发依据（人类可读） */
   evidences: string[];
 }

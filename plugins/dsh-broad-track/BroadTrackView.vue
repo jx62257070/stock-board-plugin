@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 // 宿主 UiKit / 涨跌语义等能力一律经 `deps` 注入：本插件最终以单文件产物分发，
 // 运行时没有 import 可用（详见 types.ts 的 `BroadDeps`）
 import {
@@ -15,8 +15,8 @@ import {
 } from './estimate';
 import {
   buildComboSeries,
+  buildShareCampaigns,
   buildShareSignalTimeline,
-  buildShareSignalWaves,
   recentNetFlow,
   runShareBacktest,
 } from './share-signal';
@@ -74,9 +74,15 @@ import {
   BROAD_BACKTEST_LABEL,
   BROAD_BACKTEST_NOTE,
   BROAD_BACKTEST_TITLE,
+  CAMPAIGN_CARD_MAX,
   NATIONAL_TEAM_OF_INST_RATIO,
+  SHARE_EXIT_COMPLETION_LABEL,
+  SHARE_LIFECYCLE_BADGE_CLASS,
+  SHARE_LIFECYCLE_LABEL,
   SHARE_SIGNAL_BADGE_CLASS,
   SHARE_SIGNAL_LABEL,
+  SIGNAL_ENTER_MIN_AMOUNT,
+  SIGNAL_EXIT_MIN_AMOUNT,
   SIGNAL_LEVEL_BADGE_CLASS,
   SIGNAL_LEVEL_BLOCK_CLASS,
   SIGNAL_LEVEL_LABEL,
@@ -95,6 +101,7 @@ import type {
   EtfQuarterRow,
   QuoteRow,
   ShareBacktestStat,
+  ShareCampaignWave,
   ShareSignalDay,
   SignalDayResult,
 } from './types';
@@ -131,6 +138,51 @@ const anchorOpen = ref(false);
 
 /** 份额卡「图解」帮助弹窗显隐 */
 const shareHelpOpen = ref(false);
+/** 「近 120 日信号状态」颜色图例浮层显隐（就地解释深浅，不跳大弹窗） */
+const timelineHelpOpen = ref(false);
+/** 「近 120 日信号状态」被点击钉住的交易日（空串 = 无钉住；hover 与点击都能看提示） */
+const pinnedTimelineDate = ref('');
+/** 时间轴悬停中的交易日（空串 = 光标不在图上；十字焦点线与共享读数用） */
+const hoverTimelineDate = ref('');
+/** 日期 → 序列下标（十字焦点线定位用） */
+const timelineDateIndex = computed(() => {
+  const map = new Map<string, number>();
+  comboSeries.value.forEach((point, index) => map.set(point.date, index));
+  return map;
+});
+/** 当前生效交易日：钉住优先，其次悬停 */
+const activeTimelineDate = computed(() => pinnedTimelineDate.value || hoverTimelineDate.value);
+/** 当前生效交易日的序列下标（-1 = 无） */
+const activeTimelineIndex = computed(() => {
+  const date = activeTimelineDate.value;
+  return date === '' ? -1 : timelineDateIndex.value.get(date) ?? -1;
+});
+/** 十字焦点线的 x 坐标（内容像素坐标） */
+const crosshairLeft = computed(() =>
+  activeTimelineIndex.value < 0
+    ? 0
+    : activeTimelineIndex.value * timelineDayWidth.value + timelineDayWidth.value / 2,
+);
+/** 读数行日期：钉住 / 悬停优先，否则最新交易日（常驻读数行始终有内容） */
+const readoutDate = computed(() => {
+  const active = activeTimelineDate.value;
+  if (active !== '') return active;
+  const list = comboSeries.value;
+  return list.length > 0 ? list[list.length - 1].date : '';
+});
+/** 读数行是否处于默认态（未悬停也未钉住，显示最新交易日） */
+const readoutIsDefault = computed(() => activeTimelineDate.value === '');
+/** 读数行的序列点 */
+const activeTimelinePoint = computed(() => {
+  const index = timelineDateIndex.value.get(readoutDate.value);
+  return index === undefined ? null : comboSeries.value[index] ?? null;
+});
+/** 读数行的信号状态（按日期查，避免两序列错位） */
+const activeTimelineSignal = computed(() => {
+  const date = readoutDate.value;
+  if (date === '') return null;
+  return shareTimelineFull.value.find((day) => day.date === date) ?? null;
+});
 /** 锚点编辑草稿（打开弹窗时从仓储快照初始化） */
 const anchorDraft = ref<AnchorHolding[]>([]);
 /** 锚点保存是否进行中 */
@@ -375,12 +427,222 @@ const shareTimeline = computed<ShareSignalDay[]>(() =>
   buildShareSignalTimeline(comboSeries.value),
 );
 
-/** 信号波段（统计与回测用；一次战役算一个） */
-const shareWaves = computed(() => buildShareSignalWaves(comboSeries.value));
+/** 战役生命周期列表（含疑似未确认的战役；界面主展示） */
+const shareCampaigns = computed<ShareCampaignWave[]>(() =>
+  buildShareCampaigns(comboSeries.value),
+);
 
-/** 近 120 日的逐日信号（时间线条展示用） */
-const recentShareTimeline = computed<ShareSignalDay[]>(() =>
-  shareTimeline.value.slice(-120),
+/**
+ * 战役卡展示的「有意义」战役：已确认的，或疑似但金额达到确认门槛一半的，
+ * 最多展示最近 15 场 —— 方向段状态机会把 1 日的小抖动也开成战役
+ * （真实序列 679 日有 233 场，全量渲染会淹没重点）。
+ */
+const notableCampaigns = computed<ShareCampaignWave[]>(() => {
+  const minFlow =
+    Math.min(SIGNAL_ENTER_MIN_AMOUNT, SIGNAL_EXIT_MIN_AMOUNT) / 2;
+  const list = shareCampaigns.value.filter(
+    (campaign) =>
+      campaign.confirmDate !== null ||
+      Math.abs(campaign.netFlowYi) >= minFlow,
+  );
+  return list.slice(-CAMPAIGN_CARD_MAX);
+});
+
+/** 当前所处生命周期状态（最新交易日的状态） */
+const currentLifecycle = computed<ShareSignalDay['lifecycle'] | null>(
+  () => shareTimeline.value[shareTimeline.value.length - 1]?.lifecycle ?? null,
+);
+
+/**
+ * 生命周期色块类名（近 20 日时间条用）
+ * @param lifecycle 生命周期状态
+ * @returns 色块类名（只用宿主白名单已有的类）
+ */
+const lifecycleBarClass = (lifecycle: ShareSignalDay['lifecycle']): string => {
+  if (lifecycle === 'entry_confirmed') return 'bg-up';
+  if (lifecycle === 'entry_suspected') return 'bg-up-weak';
+  if (lifecycle === 'exit_confirmed') return 'bg-down';
+  if (lifecycle === 'exit_suspected') return 'bg-down-weak';
+  return 'bg-flat-weak';
+};
+
+/** 时间轴每天占的像素（默认档位；柱宽 + 1px 间隙），全历史按此铺开、视口拖动 */
+const TIMELINE_DAY_WIDTH = 6;
+/** 滚轮缩放档位（每天像素，从「压缩全景」到「逐日放大」） */
+const TIMELINE_DAY_WIDTH_STEPS = [3, 4, 6, 9, 14, 20, 28];
+/** 当前档位（滚轮调整） */
+const timelineDayWidth = ref(TIMELINE_DAY_WIDTH);
+/** 净申赎行高随缩放档位同步放大（放大后图不至于又宽又扁） */
+const TIMELINE_ROW_HEIGHTS: Record<number, number> = { 3: 48, 4: 56, 6: 64, 9: 88, 14: 116, 20: 144, 28: 168 };
+/** 当前行高（px） */
+const flowRowHeight = computed(() => TIMELINE_ROW_HEIGHTS[timelineDayWidth.value] ?? 64);
+/** 色带行高（约为柱行的 1/4，同样随档位走） */
+const bandRowHeight = computed(() => Math.min(32, Math.max(12, Math.round(flowRowHeight.value / 4))));
+
+/** 逐日份额信号（全历史；与净申赎柱同刻度铺开） */
+const shareTimelineFull = computed<ShareSignalDay[]>(() => shareTimeline.value);
+
+/** 全历史每日净申赎柱（高度开方压缩：按全历史最大值归一后取平方根，小流量日也可见） */
+const flowBars = computed(() => {
+  const list = comboSeries.value;
+  const max = Math.max(...list.map((point) => Math.abs(point.netFlowYi ?? 0)), 1);
+  return list.map((point) => ({
+    date: point.date,
+    value: point.netFlowYi,
+    height: Math.sqrt(Math.abs(point.netFlowYi ?? 0) / max) * 100,
+  }));
+});
+
+/** 份额折线路径（x = 逐日固定像素，与柱、色带同一时间刻度） */
+const sharePath = computed(() => {
+  const list = comboSeries.value;
+  if (list.length < 2) return '';
+  const values = list.map((point) => point.totalSharesYi);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const height = 100;
+  return list
+    .map((point, index) => {
+      const w = timelineDayWidth.value;
+      const x = index * w + w / 2;
+      const y = height - ((point.totalSharesYi - min) / span) * height;
+      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+});
+
+/** 时间轴内容总宽（px） */
+const timelineWidth = computed(() => comboSeries.value.length * timelineDayWidth.value);
+
+/** 季度刻度（每季首月的位置，像素定位与内容同宽） */
+const timelineQuarterMarks = computed(() => {
+  const list = comboSeries.value;
+  const marks: { label: string; left: number }[] = [];
+  let prevMonth = '';
+  list.forEach((point, index) => {
+    const ym = point.date.slice(0, 7);
+    if (ym === prevMonth) return;
+    prevMonth = ym;
+    const month = Number(point.date.slice(5, 7));
+    if (month !== 1 && month !== 4 && month !== 7 && month !== 10) return;
+    marks.push({ label: ym, left: index * timelineDayWidth.value });
+  });
+  return marks;
+});
+
+/** 时间轴视口引用（拖动滚动容器） */
+const timelineViewport = ref<HTMLElement | null>(null);
+/** 拖动中的起点（null = 未拖动） */
+let timelineDragStart: { x: number; left: number } | null = null;
+/** 是否处于拖动中（光标样式用） */
+const timelineDragging = ref(false);
+/** 本次按下后是否发生了拖动（用于抑制拖动结束后的误点击钉住） */
+const timelineDidDrag = ref(false);
+/** 数据首次就绪后自动对齐到最新日期（右端） */
+const timelineAligned = ref(false);
+
+/**
+ * 按下：记录起点并捕获指针
+ * @param event 指针按下事件
+ */
+const onTimelinePointerDown = (event: PointerEvent) => {
+  const el = timelineViewport.value;
+  if (!el) return;
+  timelineDragStart = { x: event.clientX, left: el.scrollLeft };
+  timelineDragging.value = true;
+  timelineDidDrag.value = false;
+  el.setPointerCapture(event.pointerId);
+};
+
+/**
+ * 移动：按位移反向滚动视口（左拖右移）
+ * @param event 指针移动事件
+ */
+const onTimelinePointerMove = (event: PointerEvent) => {
+  const el = timelineViewport.value;
+  if (!el) return;
+  // 悬停跟踪：光标下的交易日驱动十字焦点线与共享读数（拖动中也跟随）
+  const rect = el.getBoundingClientRect();
+  const index = Math.floor((event.clientX - rect.left + el.scrollLeft) / timelineDayWidth.value);
+  const list = comboSeries.value;
+  hoverTimelineDate.value = index >= 0 && index < list.length ? list[index].date : '';
+  if (!timelineDragStart) return;
+  const dx = event.clientX - timelineDragStart.x;
+  if (Math.abs(dx) > 4) timelineDidDrag.value = true;
+  el.scrollLeft = timelineDragStart.left - dx;
+};
+
+/**
+ * 抬起：结束拖动
+ * @param event 指针抬起事件
+ */
+const onTimelinePointerUp = (event: PointerEvent) => {
+  const el = timelineViewport.value;
+  if (el?.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
+  timelineDragStart = null;
+  timelineDragging.value = false;
+};
+
+/**
+ * 光标离开视口：清掉悬停日（钉住不受影响）
+ */
+const onTimelinePointerLeave = (): void => {
+  hoverTimelineDate.value = '';
+};
+
+/**
+ * 点击视口：拖动过后忽略；否则钉住 / 取消钉住悬停日（十字焦点线与读数随之固定）
+ */
+const onTimelineClick = () => {
+  if (timelineDidDrag.value) {
+    timelineDidDrag.value = false;
+    return;
+  }
+  const date = hoverTimelineDate.value;
+  if (date === '') return;
+  pinnedTimelineDate.value = pinnedTimelineDate.value === date ? '' : date;
+};
+
+/**
+ * 滚轮缩放时间轴（以光标下的日期为锚点，放大 / 缩小每天像素）
+ * @param event 滚轮事件（上滚放大、下滚缩小）
+ */
+const onTimelineWheel = (event: WheelEvent) => {
+  const el = timelineViewport.value;
+  if (!el) return;
+  const steps = TIMELINE_DAY_WIDTH_STEPS;
+  const idx = steps.indexOf(timelineDayWidth.value);
+  const next = event.deltaY < 0
+    ? steps[Math.min(idx + 1, steps.length - 1)]
+    : steps[Math.max(idx - 1, 0)];
+  if (next === timelineDayWidth.value) return;
+  event.preventDefault();
+  // 记住光标位置对应的内容比例，缩放后让同一日期回到光标下方
+  const cursorX = event.clientX - el.getBoundingClientRect().left;
+  const anchor = (el.scrollLeft + cursorX) / Math.max(el.scrollWidth, 1);
+  timelineDayWidth.value = next;
+  void nextTick(() => {
+    el.scrollLeft = anchor * el.scrollWidth - cursorX;
+  });
+};
+
+/** 把视口滚到最右端（最新交易日） */
+const alignTimelineRight = () => {
+  const el = timelineViewport.value;
+  if (el) el.scrollLeft = el.scrollWidth;
+};
+
+// 数据首次就绪（或从空变非空）后，把视口对齐到最右端（最新交易日）。
+// 必须等 DOM 真正渲染完（flush: 'post' + 双 rAF），否则 scrollWidth 还是 0，滚不动。
+watch(
+  () => comboSeries.value.length,
+  (length) => {
+    if (length === 0 || timelineAligned.value) return;
+    timelineAligned.value = true;
+    requestAnimationFrame(() => requestAnimationFrame(alignTimelineRight));
+  },
+  { flush: 'post' },
 );
 
 /** 回测统计 */
@@ -397,25 +659,6 @@ const latestCombo = computed<ComboSharePoint | null>(() => {
 /** 近 5 日净申赎合计 */
 const recentFlow = computed(() => recentNetFlow(comboSeries.value, 5));
 
-/** 份额曲线 SVG 路径（组合总份额） */
-const sharePath = computed(() => {
-  const list = comboSeries.value;
-  if (list.length < 2) return '';
-  const values = list.map((point) => point.totalSharesYi);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = max - min || 1;
-  const width = 1000;
-  const height = 100;
-  return list
-    .map((point, index) => {
-      const x = (index / (list.length - 1)) * width;
-      const y = height - ((point.totalSharesYi - min) / span) * height;
-      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
-});
-
 /** 份额曲线的时间轴刻度（首 / 中 / 末） */
 const shareAxis = computed(() => {
   const list = comboSeries.value;
@@ -426,68 +669,6 @@ const shareAxis = computed(() => {
     middle: middle.date.slice(0, 7),
     last: list[list.length - 1].date.slice(0, 7),
   };
-});
-
-/** 每日净申赎柱（近 N 日；正红负绿） */
-const flowBars = computed(() => {
-  const list = comboSeries.value.slice(-120);
-  const values = list.map((point) => point.netFlowYi ?? 0);
-  const max = Math.max(...values.map((v) => Math.abs(v)), 1);
-  return list.map((point) => ({
-    date: point.date,
-    value: point.netFlowYi,
-    height: (Math.abs(point.netFlowYi ?? 0) / max) * 100,
-  }));
-});
-
-/** 信号在曲线上的标记（X 轴百分比 + 悬停要展示的波段摘要） */
-const waveMarkers = computed(() => {
-  const list = comboSeries.value;
-  if (list.length === 0) return [];
-  const indexByDate = new Map(list.map((point, index) => [point.date, index]));
-  const marks: {
-    date: string;
-    level: 'enter' | 'exit';
-    left: number;
-    streak: number;
-    flowText: string;
-  }[] = [];
-  for (const wave of shareWaves.value) {
-    if (wave.level === 'none') continue;
-    const index = indexByDate.get(wave.date);
-    if (index === undefined) continue;
-    // 悬停摘要：优先净申赎金额（亿元），金额缺失时退回份额变动（亿份）
-    const flowText =
-      wave.netFlowYi === null
-        ? `${wave.deltaSharesYi >= 0 ? '+' : ''}${wave.deltaSharesYi.toFixed(1)} 亿份`
-        : `${wave.netFlowYi >= 0 ? '+' : ''}${wave.netFlowYi.toFixed(0)} 亿元`;
-    marks.push({
-      date: wave.date,
-      level: wave.level,
-      left: (index / (list.length - 1)) * 100,
-      streak: Math.abs(wave.streak),
-      flowText,
-    });
-  }
-  return marks;
-});
-
-/** 曲线上的年份刻度（每年首个交易日的位置），让时间轴一眼能读 */
-const shareYearMarks = computed(() => {
-  const list = comboSeries.value;
-  if (list.length === 0) return [];
-  const marks: { year: string; left: number }[] = [];
-  let currentYear = '';
-  list.forEach((point, index) => {
-    const year = point.date.slice(0, 4);
-    if (year === currentYear) return;
-    currentYear = year;
-    marks.push({
-      year,
-      left: list.length > 1 ? (index / (list.length - 1)) * 100 : 0,
-    });
-  });
-  return marks;
 });
 
 /** 份额明细表的一行 */
@@ -749,30 +930,29 @@ const shortDate = (date: string): string => date.slice(5);
 
     <template v-if="hasShares">
       <!-- 份额序列主口径：汇总 + 曲线 + 净申赎柱 -->
-      <component :is="deps.ui.Card" :title="BROAD_SHARE_TITLE">
-        <template #extra>
-          <div class="flex items-center gap-1">
-            <component
-              :is="deps.ui.Button"
-              variant="ghost"
+      <!-- 标题行：BaseCard 的 title 是纯文本插槽，图标要贴着标题文字只能自定义头部 -->
+      <component :is="deps.ui.Card">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="flex items-center gap-1 text-sm font-semibold text-text">
+            {{ BROAD_SHARE_TITLE }}
+            <button
+              type="button"
+              class="pressable rounded text-text-tertiary hover:text-primary"
               :title="BROAD_SHARE_HELP_BUTTON"
               @click="shareHelpOpen = true"
             >
-              <span class="flex items-center gap-1 text-xs">
-                <component :is="deps.ui.Icon" name="info" :size="13" />
-                {{ BROAD_SHARE_HELP_BUTTON }}
-              </span>
-            </component>
-            <component
-              :is="deps.ui.Button"
-              variant="ghost"
-              :disabled="shareSyncing || refreshing || syncing"
-              @click="onSyncShares"
-            >
-              {{ BROAD_SHARE_SYNC_BUTTON }}
-            </component>
-          </div>
-        </template>
+              <component :is="deps.ui.Icon" name="help" :size="13" />
+            </button>
+          </h2>
+          <component
+            :is="deps.ui.Button"
+            variant="ghost"
+            :disabled="shareSyncing || refreshing || syncing"
+            @click="onSyncShares"
+          >
+            {{ BROAD_SHARE_SYNC_BUTTON }}
+          </component>
+        </div>
 
         <!-- 汇总指标 -->
         <div class="flex flex-wrap items-end gap-x-8 gap-y-3">
@@ -823,119 +1003,186 @@ const shortDate = (date: string): string => date.slice(5);
           </div>
         </div>
 
-        <!-- 份额曲线（SVG 折线）+ 年份刻度 + 信号标记 -->
+        <!-- 份额走势 + 每日净申赎 + 信号色带：全历史同刻度铺开，左右拖动查看 -->
         <div class="mt-4">
-          <div class="relative h-24 w-full">
-            <svg
-              class="h-full w-full"
-              :viewBox="`0 0 1000 100`"
-              preserveAspectRatio="none"
-              role="img"
-              aria-label="组合总份额走势"
-            >
-              <polyline
-                :points="sharePath"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                vector-effect="non-scaling-stroke"
-                class="text-primary"
-              />
-            </svg>
-            <!-- 年份分隔线（背景层，弱化） -->
-            <span
-              v-for="mark in shareYearMarks"
-              :key="`year-${mark.year}`"
-              class="absolute top-0 h-full bg-flat-weak"
-              :style="{ left: `${mark.left}%`, width: '1px', opacity: 0.5 }"
-            />
-            <!-- 信号标记：加宽命中区 + 悬停富提示（日期 / 类型 / 连续天数 / 累计净申赎） -->
-            <div
-              v-for="mark in waveMarkers"
-              :key="`${mark.date}-${mark.level}`"
-              class="group absolute top-0 h-full"
-              :style="{ left: `${mark.left}%`, width: '10px', transform: 'translateX(-50%)' }"
-            >
-              <span
-                class="absolute left-1/2 top-0 h-full w-0.5 -translate-x-1/2"
-                :class="mark.level === 'enter' ? 'bg-up' : 'bg-down'"
-              />
-              <span
-                class="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-md bg-text px-1.5 py-0.5 text-[10px] tabular-nums text-surface shadow-md group-hover:block"
-                style="z-index: 30"
-              >
-                <span class="block">{{ mark.date }} {{ SHARE_SIGNAL_LABEL[mark.level] }}</span>
-                <span class="block">连续 {{ mark.streak }} 天 · 累计净申赎 {{ mark.flowText }}</span>
-              </span>
-            </div>
-          </div>
-          <!-- 年份标签（按真实年份位置；首尾贴边避免裁切） -->
-          <div class="relative mt-1 h-4">
-            <span
-              v-for="(mark, index) in shareYearMarks"
-              :key="mark.year"
-              class="absolute top-0 text-[10px] tabular-nums text-text-tertiary"
-              :style="{
-                left: `${mark.left}%`,
-                transform: index === 0
-                  ? 'none'
-                  : index === shareYearMarks.length - 1
-                    ? 'translateX(-100%)'
-                    : 'translateX(-50%)',
-              }"
-            >{{ mark.year }}</span>
-          </div>
-        </div>
-
-        <!-- 每日净申赎柱（近 120 日） -->
-        <div class="mt-3">
-          <p class="mb-1 text-xs font-medium text-text-secondary">
+          <p class="relative mb-1 flex items-center gap-1 text-xs font-medium text-text-secondary">
             {{ BROAD_SHARE_CHART_TITLE }}
-          </p>
-          <div class="flex h-16 items-end gap-px">
-            <div
-              v-for="bar in flowBars"
-              :key="bar.date"
-              class="group relative flex-1"
-              :style="{ height: `${Math.max(bar.height, 1)}%` }"
+            <button
+              type="button"
+              class="pressable rounded text-text-tertiary hover:text-primary"
+              title="点击查看颜色深浅图例"
+              @click="timelineHelpOpen = !timelineHelpOpen"
             >
-              <div
-                class="h-full w-full rounded-t-[1px]"
-                :class="(bar.value ?? 0) >= 0 ? 'bg-up' : 'bg-down'"
+              <component :is="deps.ui.Icon" name="help" :size="12" />
+            </button>
+            <span class="text-[10px] font-normal text-text-tertiary">（左右拖动查看更早 · 悬停出十字线与读数 · 点击钉住）</span>
+            <!-- 颜色深浅图例浮层（就地解释，点外部关闭） -->
+            <template v-if="timelineHelpOpen">
+              <span
+                class="fixed"
+                style="inset: 0; z-index: 20"
+                @click="timelineHelpOpen = false"
               />
               <span
-                class="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-md bg-text px-1.5 py-0.5 text-[10px] tabular-nums text-surface shadow-md group-hover:block"
-                style="z-index: 30"
+                class="absolute rounded-lg border border-flat-weak bg-surface shadow-md"
+                style="top: 100%; left: 0; margin-top: 6px; z-index: 30; width: 320px; padding: 10px 12px"
               >
-                {{ bar.date.slice(5) }} · {{ bar.value === null ? '—' : `${bar.value.toFixed(0)} 亿` }}
+                <span class="block text-[11px] font-medium text-text">颜色深浅 = 判定进度</span>
+                <span class="mt-1.5 block space-y-1 text-[11px] leading-relaxed text-text-secondary">
+                  <span class="flex items-center gap-2">
+                    <span class="inline-block shrink-0 rounded-[2px] bg-up" style="width: 12px; height: 12px" />
+                    确认进场（连续同向 + 累计金额 + 回撤位置全齐）
+                  </span>
+                  <span class="flex items-center gap-2">
+                    <span class="inline-block shrink-0 rounded-[2px] bg-up" style="width: 12px; height: 12px; opacity: 0.4" />
+                    疑似进场（净申购量级已达门槛，位置 / 连续性未全齐）
+                  </span>
+                  <span class="flex items-center gap-2">
+                    <span class="inline-block shrink-0 rounded-[2px] bg-down" style="width: 12px; height: 12px" />
+                    确认退场（退场三条件全齐）
+                  </span>
+                  <span class="flex items-center gap-2">
+                    <span class="inline-block shrink-0 rounded-[2px] bg-down" style="width: 12px; height: 12px; opacity: 0.4" />
+                    疑似退场（净赎回量级已达门槛，条件未全齐）
+                  </span>
+                  <span class="flex items-center gap-2">
+                    <span class="inline-block shrink-0 rounded-[2px] bg-flat-weak" style="width: 12px; height: 12px" />
+                    观望 / 进场结束 / 退场结束 / 持仓观望
+                  </span>
+                </span>
+                <span class="mt-1.5 block text-[11px] text-text-tertiary">
+                  红 = 买（A 股习惯），绿 = 卖；三行共用十字焦点线，数据读数见标题下方常驻读数行（悬停 / 点击更新，点击可钉住）。
+                </span>
               </span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 逐日信号时间线条（近 120 日） -->
-        <div class="mt-3">
-          <p class="mb-1 text-xs font-medium text-text-secondary">近 120 日信号状态</p>
-          <div class="flex items-end gap-px">
-            <div
-              v-for="day in recentShareTimeline"
-              :key="day.date"
-              class="h-4 flex-1 rounded-[1px]"
-              :class="
-                day.level === 'enter'
-                  ? 'bg-up'
-                  : day.level === 'exit'
-                    ? 'bg-down'
-                    : 'bg-flat-weak'
-              "
-              :title="`${day.date} ${SHARE_SIGNAL_LABEL[day.level]}`"
-            />
-          </div>
-          <div class="mt-1 flex justify-between text-[10px] tabular-nums text-text-tertiary">
-            <span>{{ recentShareTimeline.length > 0 ? shortDate(recentShareTimeline[0].date) : '' }}</span>
-            <span>
-              {{ recentShareTimeline.length > 0 ? shortDate(recentShareTimeline[recentShareTimeline.length - 1].date) : '' }}
+            </template>
+          </p>
+          <!-- 常驻读数行：钉住 / 悬停日优先，否则最新交易日 -->
+          <div class="mb-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+            <span class="font-semibold tabular-nums text-text">
+              {{ activeTimelinePoint ? activeTimelinePoint.date : '—' }}
             </span>
+            <span
+              class="tabular-nums"
+              :class="trendClass(activeTimelinePoint?.netFlowYi ?? null)"
+            >
+              净申赎 {{
+                activeTimelinePoint?.netFlowYi === null || activeTimelinePoint?.netFlowYi === undefined
+                  ? '—'
+                  : `${activeTimelinePoint.netFlowYi >= 0 ? '+' : ''}${activeTimelinePoint.netFlowYi.toFixed(0)} 亿`
+              }}
+            </span>
+            <span class="tabular-nums text-text">
+              总份额 {{ activeTimelinePoint ? activeTimelinePoint.totalSharesYi.toFixed(0) : '—' }} 亿份
+            </span>
+            <span
+              v-if="activeTimelineSignal"
+              class="rounded-full px-2 py-0.5 text-[11px] font-medium"
+              :class="SHARE_LIFECYCLE_BADGE_CLASS[activeTimelineSignal.lifecycle]"
+            >
+              {{ SHARE_LIFECYCLE_LABEL[activeTimelineSignal.lifecycle] }}{{ activeTimelineSignal.level !== 'none' ? `（${SHARE_SIGNAL_LABEL[activeTimelineSignal.level]}）` : '' }}
+            </span>
+            <span v-if="readoutIsDefault" class="text-[10px] text-text-tertiary">
+              最新交易日 · 悬停 / 点击查看其他日期
+            </span>
+          </div>
+          <!-- 拖动视口：内容按每天固定宽度铺开，横向拖动平移 -->
+          <div
+            ref="timelineViewport"
+            class="relative overflow-hidden"
+            :style="{ cursor: timelineDragging ? 'grabbing' : 'grab', userSelect: 'none' }"
+            @pointerdown="onTimelinePointerDown"
+            @pointermove="onTimelinePointerMove"
+            @pointerup="onTimelinePointerUp"
+            @pointercancel="onTimelinePointerUp"
+            @pointerleave="onTimelinePointerLeave"
+            @wheel="onTimelineWheel"
+            @click="onTimelineClick"
+          >
+            <div :style="{ width: `${timelineWidth}px`, paddingTop: '26px' }">
+              <!-- 三行共用十字焦点线的容器 -->
+              <div class="relative">
+                <!-- 行1：组合总份额折线（独立一行，不被柱子遮挡） -->
+                <p class="sticky left-0 text-xs font-medium text-text-secondary">组合总份额</p>
+                <div class="relative mt-1" :style="{ height: `${flowRowHeight}px` }">
+                  <svg
+                    class="pointer-events-none absolute h-full w-full"
+                    style="inset: 0"
+                    :viewBox="`0 0 ${timelineWidth} 100`"
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label="组合总份额走势"
+                  >
+                    <!-- sharePath 是路径语法（M/L），必须用 path 的 d 属性；polyline points 只认坐标对 -->
+                    <path
+                      :d="sharePath"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      vector-effect="non-scaling-stroke"
+                      class="text-primary"
+                    />
+                  </svg>
+                </div>
+                <!-- 行2：每日净申赎柱 -->
+                <p class="sticky left-0 mt-2 text-xs font-medium text-text-secondary">每日净申赎</p>
+                <div class="relative mt-1" :style="{ height: `${flowRowHeight}px` }">
+                  <div class="flex h-full items-end" style="gap: 1px">
+                    <div
+                      v-for="bar in flowBars"
+                      :key="bar.date"
+                      class="group relative"
+                      :style="{ width: `${timelineDayWidth - 1}px`, height: `${Math.max(bar.height, 1)}%` }"
+                    >
+                      <div
+                        class="h-full w-full rounded-t-[1px]"
+                        :class="(bar.value ?? 0) >= 0 ? 'bg-up' : 'bg-down'"
+                        style="opacity: 0.8"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <!-- 行3：逐日生命周期色带（同一时间刻度） -->
+                <p class="sticky left-0 mt-2 text-xs font-medium text-text-secondary">信号状态</p>
+                <div class="mt-1 flex" style="gap: 1px">
+                  <div
+                    v-for="day in shareTimelineFull"
+                    :key="day.date"
+                    class="group relative"
+                    :class="lifecycleBarClass(day.lifecycle)"
+                    :style="{ width: `${timelineDayWidth - 1}px`, height: `${bandRowHeight}px` }"
+                  />
+                </div>
+                <!-- 十字焦点线：贯穿三行，悬停 / 钉住的交易日 -->
+                <div
+                  v-if="activeTimelineIndex >= 0"
+                  class="pointer-events-none absolute text-text-tertiary"
+                  :style="{
+                    left: `${crosshairLeft}px`,
+                    top: 0,
+                    bottom: 0,
+                    width: '1px',
+                    backgroundColor: 'currentColor',
+                    opacity: 0.55,
+                  }"
+                />
+              </div>
+              <!-- 季度刻度 -->
+              <div class="relative mt-1 h-4">
+                <span
+                  v-for="(mark, index) in timelineQuarterMarks"
+                  :key="mark.label"
+                  class="absolute top-0 text-[10px] tabular-nums text-text-tertiary"
+                  :style="{
+                    left: `${mark.left}px`,
+                    transform: index === 0
+                      ? 'none'
+                      : index === timelineQuarterMarks.length - 1
+                        ? 'translateX(-100%)'
+                        : 'translateX(-50%)',
+                  }"
+                >{{ mark.label }}</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -948,39 +1195,62 @@ const shortDate = (date: string): string => date.slice(5);
         </p>
       </component>
 
-      <!-- 进场 / 退场信号波段 -->
+      <!-- 国家队操作战役（生命周期） -->
       <component :is="deps.ui.Card" :title="BROAD_WAVE_TITLE">
-        <div v-if="shareWaves.length > 0" class="space-y-2">
+        <template #extra>
+          <span
+            v-if="currentLifecycle"
+            class="rounded-full px-2 py-0.5 text-xs font-medium"
+            :class="SHARE_LIFECYCLE_BADGE_CLASS[currentLifecycle]"
+          >
+            {{ SHARE_LIFECYCLE_LABEL[currentLifecycle] }}
+          </span>
+        </template>
+        <div v-if="notableCampaigns.length > 0" class="space-y-2">
           <div
-            v-for="wave in [...shareWaves].reverse()"
-            :key="`${wave.date}-${wave.level}`"
+            v-for="campaign in [...notableCampaigns].reverse()"
+            :key="`${campaign.level}-${campaign.startDate}`"
             class="flex items-start gap-3 rounded-lg border border-flat-weak px-3 py-2"
           >
             <span
               class="mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-xs font-medium"
-              :class="SHARE_SIGNAL_BADGE_CLASS[wave.level]"
+              :class="
+                campaign.confirmDate
+                  ? SHARE_SIGNAL_BADGE_CLASS[campaign.level]
+                  : SHARE_LIFECYCLE_BADGE_CLASS[campaign.level === 'enter' ? 'entry_suspected' : 'exit_suspected']
+              "
             >
-              {{ SHARE_SIGNAL_LABEL[wave.level] }}
+              {{ campaign.confirmDate ? SHARE_SIGNAL_LABEL[campaign.level] : SHARE_LIFECYCLE_LABEL[campaign.level === 'enter' ? 'entry_suspected' : 'exit_suspected'] }}
             </span>
             <div class="min-w-0 flex-1">
               <div class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-                <span class="text-xs font-medium tabular-nums text-text">{{ wave.date }}</span>
-                <span class="text-[11px] text-text-tertiary">
-                  持续 {{ wave.days }} 日（连续 {{ wave.streak }} 日同向）
+                <span class="text-xs font-medium tabular-nums text-text">{{ campaign.startDate }}</span>
+                <span v-if="campaign.suspectDate" class="text-[11px] tabular-nums text-text-tertiary">
+                  疑似 {{ campaign.suspectDate.slice(5) }}
                 </span>
-                <span class="text-[11px] tabular-nums" :class="trendClass(wave.deltaSharesYi)">
-                  份额 {{ wave.deltaSharesYi >= 0 ? '+' : '' }}{{ wave.deltaSharesYi.toFixed(0) }} 亿份
+                <span v-if="campaign.confirmDate" class="text-[11px] tabular-nums text-text-tertiary">
+                  确认 {{ campaign.confirmDate.slice(5) }}
                 </span>
-                <span class="text-[11px] tabular-nums" :class="trendClass(wave.netFlowYi)">
-                  净申赎 {{ wave.netFlowYi === null ? '—' : `${wave.netFlowYi >= 0 ? '+' : ''}${wave.netFlowYi.toFixed(0)}` }} 亿元
+                <span class="text-[11px] tabular-nums text-text-tertiary">
+                  结束 {{ campaign.endDate.slice(5) }}（{{ campaign.days }} 日）
                 </span>
-                <span v-if="wave.indexReturn !== null" class="text-[11px] tabular-nums text-text-tertiary">
-                  区间指数 {{ wave.indexReturn >= 0 ? '+' : '' }}{{ wave.indexReturn.toFixed(1) }}%
+                <span
+                  class="text-[11px] tabular-nums"
+                  :class="campaign.netFlowYi >= 0 ? 'text-up' : 'text-down'"
+                >
+                  {{ campaign.netFlowYi >= 0 ? '净申购' : '净赎回' }}
+                  {{ Math.abs(campaign.netFlowYi).toFixed(0) }} 亿元
+                </span>
+                <span
+                  v-if="campaign.exitCompletion"
+                  class="rounded bg-flat-weak px-1 py-0.5 text-[10px] text-text-tertiary"
+                >
+                  退场{{ SHARE_EXIT_COMPLETION_LABEL[campaign.exitCompletion] }}
                 </span>
               </div>
-              <ul class="mt-1 space-y-0.5">
+              <ul v-if="campaign.evidences.length > 0" class="mt-1 space-y-0.5">
                 <li
-                  v-for="(evidence, index) in wave.evidences"
+                  v-for="(evidence, index) in campaign.evidences"
                   :key="index"
                   class="flex items-start gap-1.5 text-[11px] leading-relaxed text-text-secondary"
                 >
@@ -992,7 +1262,7 @@ const shortDate = (date: string): string => date.slice(5);
           </div>
         </div>
         <p v-else class="text-xs text-text-tertiary">
-          暂无满足条件的信号（需要连续同向变动 + 累计金额达标 + 指数位置匹配）。
+          暂无战役（份额平稳；触发疑似需连续 2 日同向变动或单日大额申赎，确认还需累计金额与指数位置）。
         </p>
         <p class="mt-3 text-xs leading-relaxed text-text-tertiary">{{ BROAD_WAVE_NOTE }}</p>
       </component>
@@ -1335,7 +1605,7 @@ const shortDate = (date: string): string => date.slice(5);
           当前国家队占比 {{ (nationalShare * 100).toFixed(0) }}%
         </span>
       </div>
-      <div class="mt-3 max-h-80 overflow-y-auto">
+      <div class="mt-3 overflow-y-auto" style="max-height: 20rem">
         <table class="w-full text-xs">
           <thead class="sticky top-0 bg-surface">
             <tr class="text-text-tertiary">
@@ -1390,30 +1660,51 @@ const shortDate = (date: string): string => date.slice(5);
       max-width-class="max-w-xl"
     >
       <div class="space-y-4 text-xs leading-relaxed text-text-secondary">
-        <!-- 迷你示意：信号波段标记的形态 -->
+        <!-- 迷你示意：上行净申赎柱 + 下行信号状态色带 -->
         <div class="relative h-12 w-full overflow-hidden rounded-lg bg-flat-weak">
-          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 3%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 6%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 10%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 15%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 21%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 27%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-up" style="left: 33%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 55%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 62%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 70%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 78%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 86%" />
-          <span class="absolute top-1.5 h-8 w-0.5 bg-down" style="left: 93%" />
+          <span class="absolute bg-up" style="width: 3px; left: 5%; bottom: 16px; height: 55%" />
+          <span class="absolute bg-up" style="width: 3px; left: 9%; bottom: 16px; height: 30%" />
+          <span class="absolute bg-up" style="width: 3px; left: 13%; bottom: 16px; height: 45%" />
+          <span class="absolute bg-up" style="width: 3px; left: 17%; bottom: 16px; height: 20%" />
+          <span class="absolute bg-down" style="width: 3px; left: 30%; bottom: 16px; height: 62%" />
+          <span class="absolute bg-down" style="width: 3px; left: 34%; bottom: 16px; height: 38%" />
+          <span class="absolute bg-down" style="width: 3px; left: 38%; bottom: 16px; height: 22%" />
+          <span class="absolute bg-up" style="width: 3px; left: 50%; bottom: 16px; height: 48%" />
+          <span class="absolute bg-up" style="width: 3px; left: 54%; bottom: 16px; height: 26%" />
+          <span class="absolute bg-down" style="width: 3px; left: 66%; bottom: 16px; height: 34%" />
+          <span class="absolute bg-up" style="width: 3px; left: 80%; bottom: 16px; height: 58%" />
+          <span class="absolute bg-up" style="width: 3px; left: 84%; bottom: 16px; height: 36%" />
+          <span class="absolute bg-up" style="width: 3px; left: 88%; bottom: 16px; height: 44%" />
+          <span
+            class="absolute flex"
+            style="left: 4%; right: 4%; bottom: 7px; height: 4px; gap: 1px"
+          >
+            <span style="width: 7%; background: currentColor; opacity: 0.25" />
+            <span style="width: 7%; background: currentColor; opacity: 0.25" />
+            <span class="bg-up-weak" style="width: 7%" />
+            <span class="bg-up" style="width: 7%" />
+            <span class="bg-up" style="width: 7%" />
+            <span style="width: 7%; background: currentColor; opacity: 0.25" />
+            <span style="width: 7%; background: currentColor; opacity: 0.25" />
+            <span style="width: 7%; background: currentColor; opacity: 0.25" />
+            <span style="width: 7%; background: currentColor; opacity: 0.25" />
+            <span class="bg-down-weak" style="width: 7%" />
+            <span class="bg-down" style="width: 7%" />
+            <span style="width: 7%; background: currentColor; opacity: 0.25" />
+            <span style="width: 7%; background: currentColor; opacity: 0.25" />
+            <span class="bg-up-weak" style="width: 7%" />
+            <span class="bg-up" style="width: 7%" />
+            <span style="width: 3%; background: currentColor; opacity: 0.25" />
+          </span>
           <span
             class="absolute text-[10px] tabular-nums text-text-tertiary"
-            style="bottom: 2px; left: 6px"
+            style="bottom: -2px; left: 6px"
           >
             {{ shareAxis.first }}
           </span>
           <span
             class="absolute text-[10px] tabular-nums text-text-tertiary"
-            style="bottom: 2px; right: 6px"
+            style="bottom: -2px; right: 6px"
           >
             {{ shareAxis.last }}
           </span>

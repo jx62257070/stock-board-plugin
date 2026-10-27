@@ -235,6 +235,35 @@ const resolveSourceMtime = (srcDir) => {
 };
 
 /**
+ * 清掉 dist 里同一插件的历史版本包（`<id>-<旧版本>.zip`），只保留本次刚写出的产物
+ *
+ * dist 不入库（zip 渠道是 GitHub Release），留旧包只会让「哪个是最新」越来越难认。
+ * 版本段必须以数字开头才算数（`<id>-2.1.0.zip` 命中，撞名的非版本 zip 不误删）。
+ * @param id 插件 id
+ * @param keepFile 本次刚写出的产物路径
+ */
+const removeStaleZips = (id, keepFile) => {
+  const prefix = `${id}-`;
+  const removed = [];
+  for (const name of fs.readdirSync(DIST)) {
+    if (!name.startsWith(prefix) || !name.endsWith('.zip')) continue;
+    if (!/^\d/.test(name.slice(prefix.length, -'.zip'.length))) continue;
+    const full = path.join(DIST, name);
+    if (path.resolve(full) === path.resolve(keepFile)) continue;
+    try {
+      fs.rmSync(full, { force: true });
+      removed.push(name);
+    } catch {
+      // 删除失败无害（个别安全策略会把删除转成回收站操作）：保留旧包不阻塞打包
+      process.stdout.write(`  ！ 旧版本包删除失败（跳过）：${name}\n`);
+    }
+  }
+  if (removed.length > 0) {
+    process.stdout.write(`  清理历史版本包：${removed.join(', ')}\n`);
+  }
+};
+
+/**
  * 打包一个插件
  * @param target 构建目标
  * @param hostRoot 宿主仓库根目录（可为 null）
@@ -269,6 +298,7 @@ const packTarget = async (target, hostRoot) => {
   const outFile = path.join(DIST, `${id}-${manifest.version}.zip`);
   fs.mkdirSync(DIST, { recursive: true });
   fs.writeFileSync(outFile, zipped);
+  removeStaleZips(id, outFile);
 
   const kb = (zipped.byteLength / 1024).toFixed(1);
   process.stdout.write(

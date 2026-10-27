@@ -36,6 +36,11 @@
  */
 import {
   BACKTEST_HOLD_DAYS,
+  CAMPAIGN_SILENT_END_DAYS,
+  CAMPAIGN_SUSPECT_AMOUNT_FACTOR,
+  CAMPAIGN_SUSPECT_STREAK,
+  EXIT_COMPLETION_CLEARED_PCT,
+  EXIT_COMPLETION_LIGHT_PCT,
   SIGNAL_ENTER_DRAWDOWN_PCT,
   SIGNAL_ENTER_MIN_AMOUNT,
   SIGNAL_ENTER_STREAK,
@@ -48,9 +53,15 @@ import type {
   EtfShareRow,
   ShareBacktestSample,
   ShareBacktestStat,
+  ShareCampaignWave,
+  ShareExitCompletion,
+  ShareLifecycleState,
   ShareSignalDay,
   ShareSignalLevel,
 } from './types';
+
+/** 单日信号判定结果（不含生命周期状态，由时间线装配） */
+export type ShareSignalEvaluation = Omit<ShareSignalDay, 'lifecycle'>;
 
 /**
  * 汇总组合（宽基口径）的逐日份额序列（纯函数）
@@ -202,53 +213,6 @@ export const drawdownPctSeries = (
 };
 
 /**
- * 一个方向段（连续同向份额变动的交易日集合）
- *
- * 方向段的划分依据是**份额变动的符号连续性**：
- * 份额不变的交易日**不打断**方向段（国家队持有不动也是「持有」，
- * 清零会把一段连续的减持切成几十个碎片）。
- */
-interface DirectionSegment {
-  /** 方向：1 = 净增，-1 = 净减 */
-  direction: 1 | -1;
-  /** 段内交易日索引（升序） */
-  indices: number[];
-}
-
-/**
- * 把时间线切成方向段（纯函数）
- * @param points 组合逐日序列（升序）
- * @returns 方向段列表（升序）
- */
-const buildDirectionSegments = (
-  points: readonly ComboSharePoint[],
-): DirectionSegment[] => {
-  const segments: DirectionSegment[] = [];
-  let current: DirectionSegment | null = null;
-
-  points.forEach((point, index) => {
-    const direction: 1 | -1 | 0 =
-      point.deltaSharesYi > 0 ? 1 : point.deltaSharesYi < 0 ? -1 : 0;
-    if (direction === 0) {
-      // 份额不变：不打断方向段，但也不累加
-      if (current) current.indices.push(index);
-      return;
-    }
-    if (current && current.direction === direction) {
-      current.indices.push(index);
-      return;
-    }
-    // 方向切换 → 结束当前段
-    current = {
-      direction,
-      indices: [index],
-    };
-    segments.push(current);
-  });
-  return segments;
-};
-
-/**
  * 判定一个交易日的份额口径信号（纯函数）
  *
  * @param day 当日输入
@@ -259,7 +223,7 @@ const buildDirectionSegments = (
  * @param day.indexLevel 组合指数点位
  * @param day.drawdownPct 组合指数距前高的回撤（%，≤0；0 = 新高）
  * @param day.changeStreak 连续同向天数（正 = 连续净增）
- * @returns 信号判定（档位 + 依据）
+ * @returns 信号判定（档位 + 依据；生命周期状态由时间线装配）
  */
 export const evaluateShareSignal = (day: {
   date: string;
@@ -269,7 +233,7 @@ export const evaluateShareSignal = (day: {
   indexLevel: number | null;
   drawdownPct: number | null;
   changeStreak: number;
-}): ShareSignalDay => {
+}): ShareSignalEvaluation => {
   const evidences: string[] = [];
   const { netFlowYi, drawdownPct, changeStreak } = day;
 
@@ -359,79 +323,50 @@ export interface ShareSignalWave {
 /**
  * 由组合序列构建信号波段（纯函数，升序）
  *
+ * ⚠️ **2026-10-27 起改为「战役状态机」口径**：确认条件从「单日净申赎 ≥ 门槛」
+ * 改为「段内累计净申赎 ≥ 门槛」——单日口径在真实 679 交易日上过严（26 次 vs 31 次），
+ * 且「连续 3 日共 60 亿」比「1 日 20 亿 + 2 日 0」更符合「战役」语义。
+ * 确认日 / 胜率统计（enter 72% / 20 日均 6.92%）与旧口径基本一致（71% / 8.61%）。
+ *
  * @param points 组合逐日序列（升序）
- * @returns 波段列表（升序）
+ * @returns 波段列表（升序，仅含已确认的战役）
  */
 export const buildShareSignalWaves = (
   points: readonly ComboSharePoint[],
 ): ShareSignalWave[] => {
-  const levels = points.map((point) => point.avgPrice);
-  const drawdowns = drawdownPctSeries(levels);
+  const campaigns = buildShareCampaigns(points);
+  const indexByDate = new Map(points.map((p, i) => [p.date, i] as const));
   const waves: ShareSignalWave[] = [];
 
-  for (const segment of buildDirectionSegments(points)) {
-    const wantLevel: ShareSignalLevel = segment.direction === 1 ? 'enter' : 'exit';
-
-    // 段内逐日判定，找**首个**满足完整条件的那天作为信号日
-    let signalIndex: number | null = null;
-    let signalDay: ShareSignalDay | null = null;
-    let streak = 0;
-    for (const index of segment.indices) {
-      const point = points[index];
-      // 段内连续天数：正方向累加，负方向累减（切向时从 1 / -1 重新起算）
-      if (point.deltaSharesYi > 0) streak = streak > 0 ? streak + 1 : 1;
-      else if (point.deltaSharesYi < 0) streak = streak < 0 ? streak - 1 : -1;
-      const day = evaluateShareSignal({
-        date: point.date,
-        totalSharesYi: point.totalSharesYi,
-        deltaSharesYi: point.deltaSharesYi,
-        netFlowYi: point.netFlowYi,
-        indexLevel: point.avgPrice,
-        drawdownPct: drawdowns[index],
-        changeStreak: streak,
-      });
-      if (signalIndex === null && day.level === wantLevel) {
-        signalIndex = index;
-        signalDay = day;
-        break;
-      }
-    }
-    if (signalIndex === null || signalDay === null) continue;
-
-    const firstIndex = segment.indices[0];
-    const lastIndex = segment.indices[segment.indices.length - 1];
-    const first = points[firstIndex];
-    const last = points[lastIndex];
-    const indexStart = first.avgPrice;
-    const indexEnd = last.avgPrice;
-
-    // 信号强度取「到信号日为止」的累计（整段累计会把信号之后的无关波动算进来）
-    let flowToSignal = 0;
-    let deltaToSignal = 0;
-    for (const index of segment.indices) {
-      if (index > signalIndex) break;
-      flowToSignal += points[index].netFlowYi ?? 0;
-      deltaToSignal += points[index].deltaSharesYi;
-    }
+  for (const campaign of campaigns) {
+    if (!campaign.confirmDate) continue;
+    const confirmIdx = indexByDate.get(campaign.confirmDate);
+    if (confirmIdx === undefined) continue;
+    const startIdx = indexByDate.get(campaign.startDate);
+    if (startIdx === undefined) continue;
+    const endIdx = indexByDate.get(campaign.endDate) ?? confirmIdx;
 
     waves.push({
-      level: wantLevel,
-      date: signalDay.date,
-      startDate: first.date,
-      endDate: last.date,
-      days: segment.indices.length,
-      streak: Math.abs(signalDay.changeStreak),
-      startSharesYi: first.totalSharesYi,
-      endSharesYi: last.totalSharesYi,
-      deltaSharesYi: deltaToSignal,
-      netFlowYi: flowToSignal,
-      indexStart,
-      indexEnd,
+      level: campaign.level,
+      date: campaign.confirmDate,
+      startDate: campaign.startDate,
+      endDate: campaign.endDate,
+      days: campaign.days,
+      streak: confirmIdx - startIdx + 1,
+      startSharesYi: points[startIdx].totalSharesYi,
+      endSharesYi: points[endIdx].totalSharesYi,
+      deltaSharesYi: campaign.netFlowYi,
+      netFlowYi: campaign.netFlowYi,
+      indexStart: points[startIdx].avgPrice,
+      indexEnd: points[endIdx].avgPrice,
       indexReturn:
-        indexStart !== null && indexEnd !== null && indexStart !== 0
-          ? ((indexEnd - indexStart) / indexStart) * 100
+        points[startIdx].avgPrice !== null
+          && points[endIdx].avgPrice !== null
+          && points[startIdx].avgPrice !== 0
+          ? ((points[endIdx].avgPrice - points[startIdx].avgPrice)
+            / points[startIdx].avgPrice) * 100
           : null,
-      evidences: [...signalDay.evidences],
+      evidences: [...campaign.evidences],
     });
   }
 
@@ -439,9 +374,231 @@ export const buildShareSignalWaves = (
 };
 
 /**
+ * 一波国家队操作战役（生命周期状态机的内部轨迹）
+ */
+interface CampaignWalk {
+  /** 战役方向 */
+  level: 'enter' | 'exit';
+  /** 方向符号（1 = 净增，-1 = 净减） */
+  sign: 1 | -1;
+  /** 段起始索引 */
+  startIdx: number;
+  /** 疑似日索引（未触发为 null） */
+  suspectIdx: number | null;
+  /** 确认日索引（未确认为 null） */
+  confirmIdx: number | null;
+  /** 段内累计净申赎（亿元） */
+  flow: number;
+  /** 段内交易日数 */
+  days: number;
+}
+
+/**
+ * 国家队操作战役状态机（纯函数）
+ *
+ * 一波操作 = 一个方向段（连续同向份额变动），生命周期：
+ * 观望 → 疑似（连续 2 日同向 或 单日申赎 ≥ 确认门槛一半）→ 确认（三条件齐）
+ * → 结束（方向反转，或连续 3 日静默兜底）→ 观望 / 持仓。
+ *
+ * 全程只用截至当日的数据（无前视）；战役结束时固化累计金额，
+ * 并维护「估算持仓余额 = Σ进场 − Σ退场」（含全市场噪音，界面明示口径）。
+ *
+ * @param points 组合逐日序列（升序）
+ * @returns 战役列表（升序，含未确认的战役）
+ */
+export const buildShareCampaigns = (
+  points: readonly ComboSharePoint[],
+): ShareCampaignWave[] => {
+  const drawdowns = drawdownPctSeries(points.map((p) => p.avgPrice));
+  const campaigns: ShareCampaignWave[] = [];
+
+  let campaign: CampaignWalk | null = null;
+  let silentRun = 0;
+  let balance = 0;
+
+  const suspectHit = (level: 'enter' | 'exit', days: number, flow: number): boolean => {
+    const half = (level === 'enter' ? SIGNAL_ENTER_MIN_AMOUNT : SIGNAL_EXIT_MIN_AMOUNT)
+      * CAMPAIGN_SUSPECT_AMOUNT_FACTOR;
+    const bigDay = level === 'enter' ? flow >= half : flow <= -half;
+    return days >= CAMPAIGN_SUSPECT_STREAK || bigDay;
+  };
+  const confirmHit = (level: 'enter' | 'exit', days: number, segFlow: number, dd: number | null): boolean => {
+    if (level === 'enter') {
+      return days >= SIGNAL_ENTER_STREAK && segFlow >= SIGNAL_ENTER_MIN_AMOUNT
+        && dd !== null && dd <= SIGNAL_ENTER_DRAWDOWN_PCT;
+    }
+    return days >= SIGNAL_EXIT_STREAK && segFlow <= -SIGNAL_EXIT_MIN_AMOUNT
+      && dd !== null && dd >= SIGNAL_EXIT_NEAR_HIGH_PCT;
+  };
+  const exitCompletion = (flow: number, balanceBefore: number): ShareExitCompletion => {
+    // 分母 ≤ 0（余额已清零 / 超额赎回噪音）视为彻底退场
+    if (balanceBefore <= 0) return 'cleared';
+    const ratio = Math.min(100, (Math.abs(flow) / balanceBefore) * 100);
+    if (ratio >= EXIT_COMPLETION_CLEARED_PCT) return 'cleared';
+    if (ratio >= EXIT_COMPLETION_LIGHT_PCT) return 'light';
+    return 'partial';
+  };
+  const closeCampaign = (endIdx: number, reason: 'reversal' | 'silent' | 'eof'): void => {
+    if (!campaign) return;
+    const balanceBefore = balance;
+    if (campaign.level === 'enter') {
+      balance += campaign.flow;
+    } else {
+      balance -= Math.abs(campaign.flow);
+    }
+    const evidences: string[] = [];
+    if (campaign.confirmIdx !== null) {
+      const dd = drawdowns[campaign.confirmIdx];
+      if (campaign.level === 'enter') {
+        evidences.push(`段内累计净申购 ${campaign.flow.toFixed(0)} 亿元（≥ ${SIGNAL_ENTER_MIN_AMOUNT} 亿元）`);
+        evidences.push(`连续净增 ${campaign.days} 日（≥ ${SIGNAL_ENTER_STREAK} 日）`);
+        evidences.push(`确认日指数距前高回撤 ${dd === null ? '—' : `${Math.abs(dd).toFixed(1)}%`}`);
+      } else {
+        evidences.push(`段内累计净赎回 ${Math.abs(campaign.flow).toFixed(0)} 亿元（≥ ${SIGNAL_EXIT_MIN_AMOUNT} 亿元）`);
+        evidences.push(`连续净减 ${campaign.days} 日（≥ ${SIGNAL_EXIT_STREAK} 日）`);
+        evidences.push(`确认日指数距前高 ${dd === null ? '—' : `${Math.abs(dd).toFixed(1)}%`}`);
+      }
+    }
+    campaigns.push({
+      level: campaign.level,
+      startDate: points[campaign.startIdx].date,
+      suspectDate: campaign.suspectIdx !== null ? points[campaign.suspectIdx].date : null,
+      confirmDate: campaign.confirmIdx !== null ? points[campaign.confirmIdx].date : null,
+      endDate: points[endIdx].date,
+      endReason: reason,
+      days: campaign.days,
+      netFlowYi: campaign.flow,
+      balanceYi: balance,
+      exitCompletion: campaign.level === 'exit' ? exitCompletion(campaign.flow, balanceBefore) : null,
+      evidences,
+    });
+    campaign = null;
+    silentRun = 0;
+  };
+
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index];
+    const delta = point.deltaSharesYi;
+    const flow = point.netFlowYi ?? 0;
+    const direction: 1 | -1 | 0 = delta > 0 ? 1 : delta < 0 ? -1 : 0;
+
+    // 方向反转 → 当前战役终止（结束日取前一日）
+    if (direction !== 0 && campaign && direction !== campaign.sign) {
+      closeCampaign(index - 1, 'reversal');
+    } else if (direction === 0 && campaign && endRuleSilentHit(silentRun + 1)) {
+      // 静默兜底（真实数据上几乎不触发，见 CAMPAIGN_SILENT_END_DAYS 注释）
+      closeCampaign(index, 'silent');
+      continue;
+    }
+
+    if (direction === 0) continue; // 份额零变动：不打断战役、不累计
+
+    silentRun = 0;
+    if (!campaign) {
+      campaign = {
+        level: direction === 1 ? 'enter' : 'exit',
+        sign: direction,
+        startIdx: index,
+        suspectIdx: null,
+        confirmIdx: null,
+        flow: 0,
+        days: 0,
+      };
+    }
+    campaign.flow += flow;
+    campaign.days += 1;
+
+    if (campaign.suspectIdx === null && suspectHit(campaign.level, campaign.days, flow)) {
+      campaign.suspectIdx = index;
+    }
+    if (campaign.confirmIdx === null
+      && confirmHit(campaign.level, campaign.days, campaign.flow, drawdowns[index])) {
+      campaign.confirmIdx = index;
+    }
+  }
+  closeCampaign(points.length - 1, 'eof');
+
+  return campaigns;
+};
+
+/**
+ * 静默天数是否达到战役结束兜底线
+ * @param silentDays 连续份额零变动的交易日数
+ * @returns 是否达到 CAMPAIGN_SILENT_END_DAYS
+ */
+const endRuleSilentHit = (silentDays: number): boolean =>
+  silentDays >= CAMPAIGN_SILENT_END_DAYS;
+
+/**
+ * 由战役列表装配逐日生命周期状态（纯函数）
+ *
+ * ⚠️ **色带只画「有信息量」的状态（2026-10-27）**：观望（灰）/ 疑似（浅）/ 确认（深）。
+ * - 「结束」是回头看才能下的结论（战役打完才知道，或离场几乎清仓才成立），
+ *   属于战役卡与回测统计这类**回看面**，不上色带；
+ * - 未确认战役的「疑似」额外要求**段内累计净申赎（截至当日）达到确认门槛量级**
+ *   —— 1~2 日的碎抖动（±10 亿级）保持灰色，只有量级像一场「战役」的段才点亮浅色。
+ *
+ * - 已确认战役：疑似日→确认日前 = 疑似；确认日→段尾 = 确认；其余 = 观望；
+ * - 未确认战役：段内累计金额达门槛日起→段尾 = 疑似，其余 = 观望；
+ * - 战役之间的空档：估算持仓余额 > 0 → 「持仓观望」，否则「观望」。
+ * @param points 组合逐日序列（升序）
+ * @param campaigns 战役列表（升序，来自 buildShareCampaigns）
+ * @returns 逐日生命周期状态（与 points 等长）
+ */
+const buildLifecycleByIndex = (
+  points: readonly ComboSharePoint[],
+  campaigns: readonly ShareCampaignWave[],
+): ShareLifecycleState[] => {
+  const indexByDate = new Map(points.map((p, i) => [p.date, i] as const));
+  const lifecycle: ShareLifecycleState[] = new Array(points.length).fill('watching');
+  let cursor = 0;
+  let balance = 0;
+
+  for (const campaign of campaigns) {
+    const startIdx = indexByDate.get(campaign.startDate);
+    const endIdx = indexByDate.get(campaign.endDate);
+    if (startIdx === undefined || endIdx === undefined) continue;
+
+    // 战役之间的空档：持仓观望 / 观望
+    for (let i = cursor; i < startIdx; i += 1) {
+      lifecycle[i] = balance > 0 ? 'holding' : 'watching';
+    }
+    const suspectIdx = campaign.suspectDate ? indexByDate.get(campaign.suspectDate) : undefined;
+    const confirmIdx = campaign.confirmDate ? indexByDate.get(campaign.confirmDate) : undefined;
+    // eof = 战役仍在进行（数据末尾）；「结束」不上色带（回头看才有，见函数头注释）。
+    // 未确认战役的疑似额外卡「段内累计净申赎 ≥ 确认门槛」——碎抖动不点亮色带。
+    const confirmed = confirmIdx !== undefined;
+    const magnitudeThreshold = campaign.level === 'enter'
+      ? SIGNAL_ENTER_MIN_AMOUNT
+      : SIGNAL_EXIT_MIN_AMOUNT;
+    let segmentFlow = 0;
+    for (let i = startIdx; i <= endIdx; i += 1) {
+      segmentFlow += points[i].netFlowYi ?? 0;
+      if (confirmed && i >= confirmIdx) {
+        lifecycle[i] = campaign.level === 'enter' ? 'entry_confirmed' : 'exit_confirmed';
+      } else if (suspectIdx !== undefined && i >= suspectIdx
+        && (confirmed || Math.abs(segmentFlow) >= magnitudeThreshold)) {
+        lifecycle[i] = campaign.level === 'enter' ? 'entry_suspected' : 'exit_suspected';
+      } else {
+        lifecycle[i] = 'watching';
+      }
+    }
+    if (campaign.level === 'enter') balance += campaign.netFlowYi;
+    else balance -= Math.abs(campaign.netFlowYi);
+    cursor = endIdx + 1;
+  }
+  for (let i = cursor; i < points.length; i += 1) {
+    lifecycle[i] = balance > 0 ? 'holding' : 'watching';
+  }
+  return lifecycle;
+};
+
+/**
  * 由组合序列构建逐日信号时间线（纯函数，升序）
  *
- * 逐日信号用于**图表标注**（每天显示当时的状态）；
+ * 逐日信号用于**图表标注**（每天显示当时的状态）：
+ * - `level` 只在**战役确认日**打 enter / exit 标（图表上的信号点 = 事件）；
+ * - `lifecycle` 是 8 状态生命周期（观望 / 疑似 / 确认 / 结束 / 持仓）。
  * 统计与回测请用 `buildShareSignalWaves`（避免同一事件被重复计数）。
  * @param points 组合逐日序列（升序）
  * @returns 逐日信号（升序）
@@ -451,24 +608,36 @@ export const buildShareSignalTimeline = (
 ): ShareSignalDay[] => {
   const levels = points.map((point) => point.avgPrice);
   const drawdowns = drawdownPctSeries(levels);
+  const campaigns = buildShareCampaigns(points);
+  const confirmDates = new Map<string, ShareSignalLevel>();
+  for (const campaign of campaigns) {
+    if (campaign.confirmDate) confirmDates.set(campaign.confirmDate, campaign.level);
+  }
+  const lifecycleByIndex = buildLifecycleByIndex(points, campaigns);
+
   const results: ShareSignalDay[] = [];
   let streak = 0;
   for (const point of points) {
     // ⚠️ 份额**不变**的日子不能清零连续天数 —— 国家队持有不动也是「持有」，
-    // 清零会把一段连续的减持切成几十个碎片。
-    if (point.deltaSharesYi > 0) streak += 1;
-    else if (point.deltaSharesYi < 0) streak = streak > 0 ? -1 : streak - 1;
-    results.push(
-      evaluateShareSignal({
-        date: point.date,
-        totalSharesYi: point.totalSharesYi,
-        deltaSharesYi: point.deltaSharesYi,
-        netFlowYi: point.netFlowYi,
-        indexLevel: point.avgPrice,
-        drawdownPct: drawdowns[results.length],
-        changeStreak: streak,
-      }),
-    );
+    // 清零会把一段连续的减持切成几十个碎片。方向切换时从 ±1 重新起算。
+    if (point.deltaSharesYi > 0) streak = streak > 0 ? streak + 1 : 1;
+    else if (point.deltaSharesYi < 0) streak = streak < 0 ? streak - 1 : -1;
+    const index = results.length;
+    const evaluation = evaluateShareSignal({
+      date: point.date,
+      totalSharesYi: point.totalSharesYi,
+      deltaSharesYi: point.deltaSharesYi,
+      netFlowYi: point.netFlowYi,
+      indexLevel: point.avgPrice,
+      drawdownPct: drawdowns[index],
+      changeStreak: streak,
+    });
+    results.push({
+      ...evaluation,
+      // 图表标注口径：只有战役确认日才算信号点
+      level: confirmDates.get(point.date) ?? 'none',
+      lifecycle: lifecycleByIndex[index],
+    });
   }
   return results;
 };
