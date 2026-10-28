@@ -41,6 +41,10 @@ import {
   CAMPAIGN_SUSPECT_STREAK,
   EXIT_COMPLETION_CLEARED_PCT,
   EXIT_COMPLETION_LIGHT_PCT,
+  SHARE_SPLIT_CONFIRM_DAYS,
+  SHARE_SPLIT_PRICE_TOLERANCE,
+  SHARE_SPLIT_RATIO_MAX,
+  SHARE_SPLIT_RATIO_MIN,
   SIGNAL_ENTER_DRAWDOWN_PCT,
   SIGNAL_ENTER_MIN_AMOUNT,
   SIGNAL_ENTER_STREAK,
@@ -64,10 +68,128 @@ import type {
 export type ShareSignalEvaluation = Omit<ShareSignalDay, 'lifecycle'>;
 
 /**
+ * 一只 ETF 的份额折算事件（合并 / 拆分）
+ */
+interface ShareSplitEvent {
+  /** 折算生效行在（升序）序列中的索引：该行的份额已是折算后口径 */
+  index: number;
+  /** 份额倍数（折算后份额 ÷ 折算前份额；合并 < 1，拆分 > 1） */
+  factor: number;
+  /** 价格口径切换边界：该索引**之前**（不含）的价格行是旧口径 */
+  priceCut: number;
+}
+
+/**
+ * 检测单只 ETF 序列里的份额折算事件（纯函数，升序输入）
+ *
+ * 判定两条件缺一不可：
+ * 1. **份额倍数**：单日份额 ÷ 上份额 越出 [SHARE_SPLIT_RATIO_MIN, SHARE_SPLIT_RATIO_MAX]；
+ * 2. **价格确认**：折算日附近价格出现 ≈ 1/倍数 的跳变 —— 真申赎不伴随价格跳变
+ *    （2024-02-05 汇金救市 512100 单日 +132.8%，价格只 +6.8% → 正确排除）。
+ *
+ * 价格确认又分两种时序（由首个跳变价所在行决定）：
+ * - **同日生效**：折算行当日价格已是新口径 → 价格切换边界 = 折算行；
+ * - **次日生效**（实测两例都是）：折算行当日价格还是旧口径（腾讯日 K 滞后），
+ *   下一交易日才跳变 → 价格切换边界 = 折算行 + 1（折算行价格也要修）。
+ *
+ * @param rows 升序份额行
+ * @returns 折算事件列表（升序）
+ */
+const detectShareSplits = (rows: readonly EtfShareRow[]): ShareSplitEvent[] => {
+  const events: ShareSplitEvent[] = [];
+  let prevIdx = -1;
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (row.sharesYi <= 0) continue;
+    if (prevIdx >= 0) {
+      const factor = row.sharesYi / rows[prevIdx].sharesYi;
+      if (factor < SHARE_SPLIT_RATIO_MIN || factor > SHARE_SPLIT_RATIO_MAX) {
+        // 基准价：折算行之前最近一个有价行（折算行当日价可能还是旧口径，不作基准）
+        let basePrice: number | null = null;
+        for (let k = prevIdx; k >= 0 && basePrice === null; k -= 1) {
+          basePrice = rows[k].price;
+        }
+        if (basePrice !== null && basePrice > 0) {
+          const expected = 1 / factor;
+          // 从折算行当日开始找价格跳变：同日 = 当日生效，之后 = 次日生效
+          for (let j = i; j <= Math.min(i + SHARE_SPLIT_CONFIRM_DAYS, rows.length - 1); j += 1) {
+            const price = rows[j].price;
+            if (price === null || price <= 0) continue;
+            if (Math.abs(price / basePrice - expected) <= SHARE_SPLIT_PRICE_TOLERANCE * expected) {
+              events.push({ index: i, factor, priceCut: j === i ? i : i + 1 });
+              break;
+            }
+          }
+        }
+      }
+    }
+    prevIdx = i;
+  }
+  return events;
+};
+
+/**
+ * 中和单只 ETF 序列里的份额折算伪影（纯函数，不改输入）
+ *
+ * 交易所披露的份额与腾讯不复权价在折算（合并 / 拆分）日会口径切换，裸差分
+ * 会把折算当成天量申赎：510310 于 2024-09-20 合并 1.95:1 → delta_yi = -595
+ * 亿份 ≈ -951 亿元假赎回；510100 于 2025-03-07 合并 2:1 → -14.8 亿份。
+ * 同时组合指数的价格序列也在折算日断裂（510310 权重最大，9-23 指数凭空
+ * +20% 级跳变）→ 回撤序列全污染。
+ *
+ * 中和口径（全序列换算成「折算后单位」，等价于对份额做后复权）：
+ * - 折算行**之前**的份额 × factor（新旧份额可比，组合总份额曲线不再腰斩）；
+ * - 价格切换边界**之前**的价格 × 1/factor（价格序列连续，指数无假跳变）；
+ * - Δ份额与金额在修正后的序列上**重算**（折算日 delta ≈ 0，金额伪影消失；
+ *   其余日 δ×(份额因子)×价×(价格因子) 与原值一致，只有折算日被修正）。
+ *
+ * @param rows 份额行（升序或降序均可，内部先统一升序）
+ * @returns 中和后的份额行（新数组；未检出折算时逐字段等价）
+ */
+export const neutralizeShareSplits = (
+  rows: readonly EtfShareRow[],
+): EtfShareRow[] => {
+  if (rows.length < 2) return [...rows];
+  const ascending = [...rows].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const events = detectShareSplits(ascending);
+  if (events.length === 0) return ascending;
+
+  const adjusted = ascending.map((row, index) => {
+    let shareFactor = 1;
+    let priceFactor = 1;
+    for (const event of events) {
+      if (index < event.index) shareFactor *= event.factor;
+      if (index < event.priceCut) priceFactor /= event.factor;
+    }
+    return {
+      ...row,
+      sharesYi: row.sharesYi * shareFactor,
+      price: row.price === null ? null : row.price * priceFactor,
+    };
+  });
+
+  // 修正后的序列上重算 Δ份额与金额
+  let previousShares: number | null = null;
+  return adjusted.map((row) => {
+    const deltaYi = previousShares === null ? 0 : row.sharesYi - previousShares;
+    previousShares = row.sharesYi;
+    return {
+      ...row,
+      deltaYi,
+      amountYi: row.price === null ? null : deltaYi * row.price,
+    };
+  });
+};
+
+/**
  * 汇总组合（宽基口径）的逐日份额序列（纯函数）
  *
  * 组合总份额 = 当日全部有份额数据的 ETF 之和；
  * 组合净申赎金额 = 各 ETF「Δ份额 × 收盘价」之和。
+ *
+ * ⚠️ **入参先过 `neutralizeShareSplits`**：交易所份额与不复权价在 ETF
+ * 折算（合并 / 拆分）日会口径切换，裸差分会把折算当成天量申赎（实测
+ * 510310 2024-09-20 合并被算成 -951 亿元假赎回），必须先中和再进引擎。
  *
  * ⚠️ **组合指数用固定权重的 Laspeyres 价格指数**（不是「各 ETF 收盘价的等权平均」）：
  * - 等权平均会随「当天哪几只 ETF 有数据」跳变 → 产生**虚假涨跌幅**；
@@ -90,7 +212,7 @@ export const buildComboSeries = (
   // 日期 → 当日各 ETF 的份额行
   const byDate = new Map<string, EtfShareRow[]>();
   for (const rows of sharesByCode.values()) {
-    for (const row of rows) {
+    for (const row of neutralizeShareSplits(rows)) {
       const bucket = byDate.get(row.date);
       if (bucket) bucket.push(row);
       else byDate.set(row.date, [row]);

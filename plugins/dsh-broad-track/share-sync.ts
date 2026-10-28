@@ -286,7 +286,14 @@ export const syncShareSeries = async (
   }
 
   // 5) 深市：逐只拉整段区间历史
+  //
+  // ⚠️ **深市整域失败的常见根因是代理分流（2026-10-28 排查）**：本机代理 TUN
+  // 把 `szse.cn` 分到被深交所 WAF 拒绝的出口（境外节点），表现是「TLS 能握手、
+  // 随后被掐 / 空响应」且换任何客户端都一样（DNS 被 fake-ip 接管，绕不开）。
+  // 上交所域名分到的出口可用，所以历来只缺深市。修法在用户侧：代理软件给
+  // `szse.cn` 加直连规则（或临时关 TUN），重跑同步即可靠断点续传回填。
   const szseRows: SzseShareRow[] = [];
+  let szseFailed = 0;
   for (const etf of szseEtfs) {
     try {
       const rows = await fetchSzseShareHistory(deps, etf.code, start, end);
@@ -295,12 +302,20 @@ export const syncShareSeries = async (
       tick();
     } catch (error) {
       requestCount += 1;
+      szseFailed += 1;
       tick();
       warnings.push(
         `${etf.name}（${etf.code}）深交所份额取数失败：${error instanceof Error ? error.message : String(error)}`,
       );
     }
     await deps.format.delay(EXCHANGE_DELAY_MS);
+  }
+  if (szseEtfs.length > 0 && szseFailed === szseEtfs.length) {
+    warnings.push(
+      '深交所份额整域不可达（深市标的全部失败）：大概率是代理把 szse.cn 分流到了'
+      + '被深交所拒绝的出口 —— 在代理软件里给 szse.cn 加直连规则（或临时关闭代理）'
+      + '后重新同步，已入库数据不受影响，缺失部分会自动断点续传回填',
+    );
   }
 
   // 6) 算变动 + 落库
