@@ -35,6 +35,8 @@
  * 本模块不碰网络与宿主能力，输入全是落库行 → 可喂固定数据断言。
  */
 import {
+  BROAD_ADVICE_ACTION_DETAIL,
+  BROAD_ADVICE_ACTION_LABEL,
   BACKTEST_HOLD_DAYS,
   CAMPAIGN_SILENT_END_DAYS,
   CAMPAIGN_SUSPECT_AMOUNT_FACTOR,
@@ -53,6 +55,7 @@ import {
   SIGNAL_EXIT_MIN_AMOUNT,
   SIGNAL_EXIT_STREAK,
 } from './constants';
+import type { OperationAdviceAction } from './constants';
 import type {
   AnchorHolding,
   ComboSharePoint,
@@ -1041,4 +1044,96 @@ export const recentNetFlow = (
     else totalYi += point.netFlowYi;
   }
   return { totalYi, missingDays };
+};
+
+/** 单日操作建议（生命周期 → 用户动作的机械映射结果） */
+export interface OperationAdvicePoint {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 建议档位 */
+  action: OperationAdviceAction;
+  /** 建议标题（档位文案；当前建议含战役上下文后缀） */
+  title: string;
+  /** 建议说明（静态口径 + 当前建议的战役数据） */
+  detail: string;
+  /** 着色档位（跟随买 = up 红，跟随卖 = down 绿，观望 = flat 灰） */
+  tone: 'up' | 'down' | 'flat';
+}
+
+/** 生命周期 → 建议档位 / 着色 的映射表（watching 与战役结束态归「观望」类） */
+const ADVICE_BY_LIFECYCLE: Record<
+  ShareLifecycleState,
+  { action: OperationAdviceAction; tone: 'up' | 'down' | 'flat' }
+> = {
+  watching: { action: 'flat', tone: 'flat' },
+  entry_suspected: { action: 'probe', tone: 'up' },
+  entry_confirmed: { action: 'buy', tone: 'up' },
+  entry_done: { action: 'hold', tone: 'flat' },
+  holding: { action: 'hold', tone: 'flat' },
+  exit_suspected: { action: 'trim_watch', tone: 'down' },
+  exit_confirmed: { action: 'sell', tone: 'down' },
+  exit_done: { action: 'flat', tone: 'flat' },
+};
+
+/**
+ * 构建用户操作建议序列（纯函数）
+ *
+ * 口径：把信号引擎的生命周期状态**机械**翻译成跟随者动作 ——
+ * 疑似进场 → 轻仓试探；确认进场 → 跟随买入；战役结束 → 持有；
+ * 疑似退场 → 留意减仓；确认退场 → 跟随减仓；退场结束 / 无战役 → 空仓观望。
+ * 不做任何仓位优化或择时增强，保持「抄作业」的原始语义。
+ *
+ * 输出两份：
+ * - `current`：最新交易日的建议，标题 / 说明追加**进行中战役**的上下文
+ *   （确认第几天、段内累计净申赎金额），是界面上重点展示的对象；
+ * - `changes`：建议发生变化的交易日列表（升序，含首日）——
+ *   用户回看「哪些天该买过 / 该卖过」用，界面取尾部若干条展示。
+ *
+ * @param timeline 逐日信号（升序；buildShareSignalTimeline 输出）
+ * @param campaigns 战役列表（升序；buildShareCampaigns 输出）
+ * @returns 当前建议（无数据为 null）与建议变化点
+ */
+export const buildOperationAdvice = (
+  timeline: readonly ShareSignalDay[],
+  campaigns: readonly ShareCampaignWave[],
+): { current: OperationAdvicePoint | null; changes: OperationAdvicePoint[] } => {
+  if (timeline.length === 0) return { current: null, changes: [] };
+
+  // 逐日机械映射
+  const points: OperationAdvicePoint[] = timeline.map((day) => {
+    const mapped = ADVICE_BY_LIFECYCLE[day.lifecycle];
+    return {
+      date: day.date,
+      action: mapped.action,
+      tone: mapped.tone,
+      title: BROAD_ADVICE_ACTION_LABEL[mapped.action],
+      detail: BROAD_ADVICE_ACTION_DETAIL[mapped.action],
+    };
+  });
+
+  // 变化点：首日 + 与前一日档位不同的日子
+  const changes = points.filter(
+    (point, index) => index === 0 || point.action !== points[index - 1].action,
+  );
+
+  // 当前建议追加进行中战役的上下文（确认第几天 / 段内累计净申赎）
+  const last = points[points.length - 1];
+  const ongoing = campaigns.length > 0 ? campaigns[campaigns.length - 1] : null;
+  if (ongoing && ongoing.endReason === 'eof') {
+    const anchorDate = ongoing.confirmDate ?? ongoing.suspectDate ?? ongoing.startDate;
+    const anchorIndex = timeline.findIndex((day) => day.date === anchorDate);
+    const daysIn = anchorIndex >= 0 ? timeline.length - anchorIndex : 0;
+    const flowText = `${ongoing.netFlowYi >= 0 ? '+' : ''}${ongoing.netFlowYi.toFixed(0)} 亿`;
+    if (last.action === 'buy' || last.action === 'probe') {
+      const stage = ongoing.confirmDate ? `确认第 ${daysIn} 天` : `疑似第 ${daysIn} 天`;
+      last.title += `（${stage}，段内累计 ${flowText}）`;
+      last.detail += ` 当前战役：${ongoing.startDate} 起，段内累计净申购 ${flowText}。`;
+    } else if (last.action === 'sell' || last.action === 'trim_watch') {
+      const stage = ongoing.confirmDate ? `确认第 ${daysIn} 天` : `疑似第 ${daysIn} 天`;
+      last.title += `（${stage}，段内累计 ${flowText}）`;
+      last.detail += ` 当前战役：${ongoing.startDate} 起，段内累计净赎回 ${flowText}。`;
+    }
+  }
+
+  return { current: last, changes };
 };

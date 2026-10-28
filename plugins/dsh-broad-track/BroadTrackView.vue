@@ -16,6 +16,7 @@ import {
 import {
   buildComboSeries,
   buildNationalSeries,
+  buildOperationAdvice,
   buildShareCampaigns,
   buildShareSignalTimeline,
   recentNetFlow,
@@ -76,6 +77,10 @@ import {
   BROAD_BACKTEST_LABEL,
   BROAD_BACKTEST_NOTE,
   BROAD_BACKTEST_TITLE,
+  BROAD_ADVICE_ACTION_CLASS,
+  BROAD_ADVICE_ACTION_LABEL,
+  BROAD_ADVICE_NOTE,
+  BROAD_ADVICE_TITLE,
   CAMPAIGN_CARD_MAX,
   NATIONAL_TEAM_OF_INST_RATIO,
   SHARE_EXIT_COMPLETION_LABEL,
@@ -94,6 +99,7 @@ import {
 import type { PluginSettingsStore } from '../../host/types/plugin.types';
 import type { TableColumn } from '../../host/types/table.types';
 import type { BroadRepo } from './storage';
+import type { OperationAdvicePoint } from './share-signal';
 import type {
   AnchorHolding,
   BroadDeps,
@@ -520,6 +526,21 @@ const notableCampaigns = computed<ShareCampaignWave[]>(() => {
 /** 当前所处生命周期状态（最新交易日的状态） */
 const currentLifecycle = computed<ShareSignalDay['lifecycle'] | null>(
   () => shareTimeline.value[shareTimeline.value.length - 1]?.lifecycle ?? null,
+);
+
+/**
+ * 操作建议（生命周期 → 跟随者动作的机械映射）
+ *
+ * current = 最新交易日建议（含进行中战役的上下文）；changes = 建议变化点
+ * （升序全量），界面取尾部若干条展示「哪些天该买过 / 该卖过」。
+ */
+const operationAdvice = computed(() =>
+  buildOperationAdvice(shareTimeline.value, shareCampaigns.value),
+);
+
+/** 近期建议变化（最多 6 条，倒序展示） */
+const recentAdviceChanges = computed<OperationAdvicePoint[]>(() =>
+  operationAdvice.value.changes.slice(-6).reverse(),
 );
 
 /**
@@ -1358,6 +1379,38 @@ const shortDate = (date: string): string => date.slice(5);
           暂无战役（份额平稳；触发疑似需连续 2 日同向变动或单日大额申赎，确认还需累计金额与指数位置）。
         </p>
         <p class="mt-3 text-xs leading-relaxed text-text-tertiary">{{ BROAD_WAVE_NOTE }}</p>
+      </component>
+
+      <!-- 操作建议：生命周期 → 跟随者动作的机械映射 -->
+      <component :is="deps.ui.Card" v-if="operationAdvice.current" :title="BROAD_ADVICE_TITLE">
+        <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <span
+            class="rounded px-2 py-0.5 text-sm font-medium"
+            :class="BROAD_ADVICE_ACTION_CLASS[operationAdvice.current.action]"
+          >
+            {{ operationAdvice.current.title }}
+          </span>
+          <span class="text-[11px] text-text-tertiary">
+            基于 {{ operationAdvice.current.date }} 收盘数据（{{ SHARE_LIFECYCLE_LABEL[currentLifecycle ?? 'watching'] }}）
+          </span>
+        </div>
+        <p class="mt-2 text-xs leading-relaxed text-text-secondary">
+          {{ operationAdvice.current.detail }}
+        </p>
+        <div v-if="recentAdviceChanges.length > 1" class="mt-3">
+          <p class="text-[11px] font-medium text-text-tertiary">近期建议变化</p>
+          <div class="mt-1 flex flex-wrap gap-1.5">
+            <span
+              v-for="change in recentAdviceChanges"
+              :key="change.date"
+              class="rounded bg-flat-weak px-1.5 py-0.5 text-[11px] tabular-nums"
+              :class="BROAD_ADVICE_ACTION_CLASS[change.action]"
+            >
+              {{ change.date.slice(5) }} {{ BROAD_ADVICE_ACTION_LABEL[change.action] }}
+            </span>
+          </div>
+        </div>
+        <p class="mt-3 text-xs leading-relaxed text-text-tertiary">{{ BROAD_ADVICE_NOTE }}</p>
       </component>
 
       <!-- 信号回测 -->

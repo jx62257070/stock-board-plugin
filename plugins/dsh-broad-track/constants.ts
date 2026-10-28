@@ -1055,3 +1055,56 @@ export const BROAD_DISCLAIMER =
   '本页为份额变动的推定工具，不构成投资建议：ETF 份额变动是全市场净申赎，不是国家队专属持仓；'
   + '「进场 / 退场」是基于「连续大额申赎 + 指数位置」的形态推定，与真实操作必然存在偏差。'
   + '数据只在点击按钮时请求上游，落本地插件库；份额来自交易所官方逐日披露。';
+
+/**
+ * 用户操作建议档位（生命周期 → 动作的机械映射）
+ *
+ * 六档动作与八态生命周期的对应见 buildOperationAdvice；这里是展示文案
+ * 与着色口径（红涨绿跌：跟随买入 = 红，跟随减仓 = 绿，观望 = 中性灰）。
+ */
+export type OperationAdviceAction =
+  | 'probe'
+  | 'buy'
+  | 'hold'
+  | 'trim_watch'
+  | 'sell'
+  | 'flat';
+
+/** 操作建议档位展示文案 */
+export const BROAD_ADVICE_ACTION_LABEL = {
+  probe: '轻仓试探',
+  buy: '跟随进场 / 加仓',
+  hold: '持有不动',
+  trim_watch: '留意减仓',
+  sell: '跟随出场 / 减仓',
+  flat: '空仓观望',
+} as const;
+
+/** 操作建议档位说明（静态部分；当前建议会追加战役上下文） */
+export const BROAD_ADVICE_ACTION_DETAIL = {
+  probe: '国家队疑似在进场（连续同向或单日大额申购），但三证据未齐。可小仓位试探建底仓，主仓等确认再加 —— 疑似转确认概率高，但假疑似也存在。',
+  buy: '国家队进场已确认（连续天数 + 累计金额 + 指数位置三条件齐）。历史回测确认信号后 20 日平均收益为正，可分批跟随建仓 / 加仓，不建议一次性打满。',
+  hold: '国家队进场段已结束、持仓不动。已跟随者继续持有；未上车者不追高 —— 确认期已过，此时进场的盈亏比不如等下一轮信号。',
+  trim_watch: '国家队疑似在退场（连续净赎回），三证据未齐。可先兑现部分利润锁定收益，剩余仓位等确认信号再做决定。',
+  sell: '国家队退场已确认。历史回测确认信号后 20 日下跌概率过半，应分批跟随减仓；减仓节奏参考退场完成度（减仓中先减 1/3，轻仓减至半仓以下，清仓余仓出尽）。',
+  flat: '国家队已基本撤退或暂无操作迹象。空仓 / 轻仓观望，等下一轮疑似进场信号再介入；定投计划不受此信号影响。',
+} as const;
+
+/** 操作建议档位徽标类名（只复用宿主白名单已有类） */
+export const BROAD_ADVICE_ACTION_CLASS = {
+  probe: 'bg-up-weak text-up',
+  buy: 'bg-up-weak text-up',
+  hold: 'bg-flat-weak text-text-tertiary',
+  trim_watch: 'bg-down-weak text-down',
+  sell: 'bg-down-weak text-down',
+  flat: 'bg-flat-weak text-text-tertiary',
+} as const;
+
+/** 操作建议卡标题 */
+export const BROAD_ADVICE_TITLE = '操作建议';
+
+/** 操作建议卡说明（机械映射口径 + 免责） */
+export const BROAD_ADVICE_NOTE =
+  '建议由信号引擎的生命周期状态机械映射而来（疑似 = 轻仓试探 / 留意减仓，确认 = 跟随进出，'
+  + '战役结束 = 持有或观望），仅描述「国家队在做什么」的跟随策略，不构成投资建议；'
+  + '仓位节奏只是经验参考，请结合自身风险承受能力决定。';
