@@ -37,6 +37,12 @@
 import {
   BROAD_ADVICE_ACTION_DETAIL,
   BROAD_ADVICE_ACTION_LABEL,
+  ADVICE_EVIDENCE_WINDOW_DAYS,
+  ADVICE_ENTER_DEEP_DD_PCT,
+  ADVICE_EXIT_NEAR_HIGH_PCT,
+  ADVICE_FAST_CONFIRM_DAYS,
+  ADVICE_FOLLOW_RATIO,
+  ADVICE_STRONG_AMOUNT_FACTOR,
   BACKTEST_HOLD_DAYS,
   CAMPAIGN_SILENT_END_DAYS,
   CAMPAIGN_SUSPECT_AMOUNT_FACTOR,
@@ -54,12 +60,15 @@ import {
   SIGNAL_EXIT_NEAR_HIGH_PCT,
   SIGNAL_EXIT_MIN_AMOUNT,
   SIGNAL_EXIT_STREAK,
+  YUAN_PER_YI,
 } from './constants';
 import type { OperationAdviceAction } from './constants';
 import type {
   AnchorHolding,
   ComboSharePoint,
+  EtfDailyRow,
   EtfHolderRow,
+  EtfMarginRow,
   EtfShareRow,
   ShareBacktestSample,
   ShareBacktestStat,
@@ -1046,7 +1055,7 @@ export const recentNetFlow = (
   return { totalYi, missingDays };
 };
 
-/** 单日操作建议（生命周期 → 用户动作的机械映射结果） */
+/** 单日操作建议（生命周期 + 证据评分 → 用户动作） */
 export interface OperationAdvicePoint {
   /** 交易日（YYYY-MM-DD） */
   date: string;
@@ -1058,56 +1067,311 @@ export interface OperationAdvicePoint {
   detail: string;
   /** 着色档位（跟随买 = up 红，跟随卖 = down 绿，观望 = flat 灰） */
   tone: 'up' | 'down' | 'flat';
+  /** 证据评分（通过数 / 可判数；无可判证据为 '—'） */
+  scoreText: string;
+  /** 逐条证据明细（只在疑似 / 确认状态下非空） */
+  evidences: AdviceEvidence[];
 }
 
-/** 生命周期 → 建议档位 / 着色 的映射表（watching 与战役结束态归「观望」类） */
-const ADVICE_BY_LIFECYCLE: Record<
-  ShareLifecycleState,
-  { action: OperationAdviceAction; tone: 'up' | 'down' | 'flat' }
-> = {
-  watching: { action: 'flat', tone: 'flat' },
-  entry_suspected: { action: 'probe', tone: 'up' },
-  entry_confirmed: { action: 'buy', tone: 'up' },
-  entry_done: { action: 'hold', tone: 'flat' },
-  holding: { action: 'hold', tone: 'flat' },
-  exit_suspected: { action: 'trim_watch', tone: 'down' },
-  exit_confirmed: { action: 'sell', tone: 'down' },
-  exit_done: { action: 'flat', tone: 'flat' },
+/** 一条建议证据（评分的单项，全部可复算） */
+export interface AdviceEvidence {
+  /** 证据键 */
+  key: 'amount' | 'speed' | 'position' | 'mainflow' | 'margin';
+  /** 展示名 */
+  label: string;
+  /** 判定结果（missing 不参与评分，分数按可判项归一） */
+  status: 'pass' | 'fail' | 'missing';
+  /** 人类可读的判定说明（含数值） */
+  detail: string;
+}
+
+/**
+ * 操作建议的输入（证据评分需要份额战役之外的独立维度）
+ */
+export interface OperationAdviceInput {
+  /** 逐日信号（升序；buildShareSignalTimeline 输出） */
+  timeline: readonly ShareSignalDay[];
+  /** 战役列表（升序；buildShareCampaigns 输出） */
+  campaigns: readonly ShareCampaignWave[];
+  /** 组合逐日序列（升序；与 timeline 同刻度同长度） */
+  comboPoints: readonly ComboSharePoint[];
+  /** 代码 → 日频行（主力资金流证据用；可传空 map = 证据缺失） */
+  dailyByCode: ReadonlyMap<string, readonly EtfDailyRow[]>;
+  /** 代码 → 两融余额行（杠杆证据用；可传空 map = 证据缺失） */
+  marginByCode: ReadonlyMap<string, readonly EtfMarginRow[]>;
+}
+
+/**
+ * 证据评分的门槛（按战役方向）
+ * @param level 战役方向
+ * @returns 确认门槛（亿元）
+ */
+const adviceThresholdOf = (level: 'enter' | 'exit'): number =>
+  level === 'enter' ? SIGNAL_ENTER_MIN_AMOUNT : SIGNAL_EXIT_MIN_AMOUNT;
+
+/**
+ * 计算一场战役截至某日的 5 项证据（纯函数，闭包内的数据查表）
+ *
+ * 口径（全部只用截至当日的数据，无前视）：
+ * - **金额规模**：段内累计净申赎 ≥ 门槛 × ADVICE_STRONG_AMOUNT_FACTOR
+ *   （确认本身只要求 1 倍门槛，2 倍才算「强战役」）；
+ * - **确认速度**：段起始到当日 ≤ ADVICE_FAST_CONFIRM_DAYS 个交易日
+ *   （国家队级动作通常一口气完成，拖 10 天的更像散户 / 险资的分散行为）；
+ * - **指数位置**：进场 = 距前高回撤 ≤ ADVICE_ENTER_DEEP_DD_PCT（比确认门槛
+ *   -8% 更深，越深越像护盘）；退场 = 距前高 ≥ ADVICE_EXIT_NEAR_HIGH_PCT
+ *   （比确认门槛 -2% 更贴前高，高位派发才危险）；
+ * - **主力同向**：近 ADVICE_EVIDENCE_WINDOW_DAYS 日清单主力净流入合计与
+ *   战役同向（国家队一级申赎通常伴随二级市场主力流入 / 流出）；
+ * - **两融同向（共振口径）**：近 ADVICE_EVIDENCE_WINDOW_DAYS 日清单融资
+ *   余额变化与战役同向——进场时 ≥ 0（国家队申购护住指数，杠杆资金跟进加仓，
+ *   情绪与资金共振）、退场时 ≤ 0（杠杆同步撤退）。
+ *   ⚠️ 口径由真实数据回测择优（.ai/bt/scan-advice-score.cjs，29 场确认进场）：
+ *   共振口径强组（通过率 ≥ 0.6）25 场 20 日均 +6.12% / 胜率 68%，弱组 4 场
+ *   -5.19% / 25%；曾被寄望的「对手方口径」（进场时杠杆去化 = 筹码换手）实测
+ *   **反向**——强组 +4.13% / 58% 反而不如弱组 +6.62% / 80%，弃用。
+ *
+ * 数据未覆盖时该证据标 missing（不参与评分），**不猜 0**。
+ * @param comboPoints 组合逐日序列（升序）
+ * @param drawdowns 组合指数逐日回撤（与 comboPoints 等长；缺失为 null）
+ * @param dailyByCode 代码 → 日频行（主力资金证据；空 map = 缺失）
+ * @param marginByCode 代码 → 两融行（杠杆证据；空 map = 缺失）
+ * @param indexByDate 日期 → 组合序列索引
+ * @returns 证据评估函数 `(campaign, asOfIdx) => 5 项证据`
+ */
+const makeEvidenceEvaluator = (
+  comboPoints: readonly ComboSharePoint[],
+  drawdowns: readonly (number | null)[],
+  dailyByCode: ReadonlyMap<string, readonly EtfDailyRow[]>,
+  marginByCode: ReadonlyMap<string, readonly EtfMarginRow[]>,
+  indexByDate: ReadonlyMap<string, number>,
+) => {
+  // 主力资金逐日合计（元）：某日全部 ETF 都缺主力口径 → 该日无键 → 缺失
+  const mainFlowByDate = new Map<string, number>();
+  for (const rows of dailyByCode.values()) {
+    for (const row of rows) {
+      if (row.mainInflow === null) continue;
+      mainFlowByDate.set(row.date, (mainFlowByDate.get(row.date) ?? 0) + row.mainInflow);
+    }
+  }
+
+  // 两融余额逐日合计（亿元）：当日一只 ETF 都没余额数据 → 缺失
+  const marginBalanceByDate = new Map<string, { sum: number; count: number }>();
+  for (const rows of marginByCode.values()) {
+    for (const row of rows) {
+      if (row.balanceYi === null) continue;
+      const bucket = marginBalanceByDate.get(row.date) ?? { sum: 0, count: 0 };
+      bucket.sum += row.balanceYi;
+      bucket.count += 1;
+      marginBalanceByDate.set(row.date, bucket);
+    }
+  }
+
+  return (campaign: ShareCampaignWave, asOfIdx: number): AdviceEvidence[] => {
+    const evidences: AdviceEvidence[] = [];
+    const enter = campaign.level === 'enter';
+    const startIdx = indexByDate.get(campaign.startDate);
+    const threshold = adviceThresholdOf(campaign.level);
+
+    // ① 金额规模
+    let flow = 0;
+    if (startIdx !== undefined) {
+      for (let i = startIdx; i <= asOfIdx; i += 1) flow += comboPoints[i].netFlowYi ?? 0;
+    }
+    const strongFlow = threshold * ADVICE_STRONG_AMOUNT_FACTOR;
+    evidences.push({
+      key: 'amount',
+      label: '金额规模',
+      status: Math.abs(flow) >= strongFlow ? 'pass' : 'fail',
+      detail: `段内累计净${enter ? '申购' : '赎回'} ${Math.abs(flow).toFixed(0)} 亿元，`
+        + `${Math.abs(flow) >= strongFlow ? '达到' : '未达到'}强度线 ${strongFlow} 亿元（确认门槛 ${threshold} 亿 × ${ADVICE_STRONG_AMOUNT_FACTOR}）`,
+    });
+
+    // ② 确认速度
+    const days = startIdx === undefined ? 0 : asOfIdx - startIdx + 1;
+    evidences.push({
+      key: 'speed',
+      label: '确认速度',
+      status: days > 0 && days <= ADVICE_FAST_CONFIRM_DAYS ? 'pass' : 'fail',
+      detail: `历时 ${days} 个交易日，${days <= ADVICE_FAST_CONFIRM_DAYS ? '急战形态（国家队级动作通常一口气完成）' : '拖沓阴跌 / 缓涨，更像分散资金行为'}`,
+    });
+
+    // ③ 指数位置
+    const dd = drawdowns[asOfIdx] ?? null;
+    if (dd === null) {
+      evidences.push({ key: 'position', label: '指数位置', status: 'missing', detail: '指数数据缺失' });
+    } else if (enter) {
+      const pass = dd <= ADVICE_ENTER_DEEP_DD_PCT;
+      evidences.push({
+        key: 'position',
+        label: '指数位置',
+        status: pass ? 'pass' : 'fail',
+        detail: `距前高回撤 ${dd.toFixed(1)}%，${pass ? '深跌护盘形态' : '回撤不足（≥ 12% 深跌更典型）'}`,
+      });
+    } else {
+      const pass = dd >= ADVICE_EXIT_NEAR_HIGH_PCT;
+      evidences.push({
+        key: 'position',
+        label: '指数位置',
+        status: pass ? 'pass' : 'fail',
+        detail: `距前高 ${Math.abs(dd).toFixed(1)}%，${pass ? '高位派发形态' : '距前高尚远（< 1% 更典型）'}`,
+      });
+    }
+
+    // ④ 主力同向
+    const windowStart = Math.max(0, asOfIdx - ADVICE_EVIDENCE_WINDOW_DAYS + 1);
+    let mainSum = 0;
+    let mainDays = 0;
+    for (let i = windowStart; i <= asOfIdx; i += 1) {
+      const value = mainFlowByDate.get(comboPoints[i].date);
+      if (value === undefined) continue;
+      mainSum += value;
+      mainDays += 1;
+    }
+    if (mainDays === 0) {
+      evidences.push({
+        key: 'mainflow',
+        label: '主力同向',
+        status: 'missing',
+        detail: `资金流数据未覆盖该日期段（东财 fflow 只回溯 ${'~121'} 个交易日）`,
+      });
+    } else {
+      const sumYi = mainSum / YUAN_PER_YI;
+      const pass = enter ? mainSum > 0 : mainSum < 0;
+      evidences.push({
+        key: 'mainflow',
+        label: '主力同向',
+        status: pass ? 'pass' : 'fail',
+        detail: `近 ${ADVICE_EVIDENCE_WINDOW_DAYS} 日清单主力净流入合计 ${sumYi >= 0 ? '+' : ''}${sumYi.toFixed(1)} 亿元，`
+          + `${pass ? '与国家队同向' : '与国家队反向（二级市场未跟随）'}`,
+      });
+    }
+
+    // ⑤ 两融同向（共振口径，2026-10-28 回测择优）
+    const startBucket = marginBalanceByDate.get(comboPoints[windowStart].date);
+    const endBucket = marginBalanceByDate.get(comboPoints[asOfIdx].date);
+    if (!startBucket || !endBucket) {
+      evidences.push({
+        key: 'margin',
+        label: '两融同向',
+        status: 'missing',
+        detail: '两融数据未覆盖该日期段（同步后即有）',
+      });
+    } else {
+      const delta = endBucket.sum - startBucket.sum;
+      const pass = enter ? delta >= 0 : delta <= 0;
+      evidences.push({
+        key: 'margin',
+        label: '两融同向',
+        status: pass ? 'pass' : 'fail',
+        detail: `近 ${ADVICE_EVIDENCE_WINDOW_DAYS} 日清单融资余额变化 ${delta >= 0 ? '+' : ''}${delta.toFixed(1)} 亿元，`
+          + `${pass ? '杠杆资金与国家队共振' : '杠杆资金未跟进（情绪未共振）'}`,
+      });
+    }
+
+    return evidences;
+  };
 };
 
 /**
- * 构建用户操作建议序列（纯函数）
+ * 生命周期 + 证据通过率 → 建议档位（门控表）
  *
- * 口径：把信号引擎的生命周期状态**机械**翻译成跟随者动作 ——
- * 疑似进场 → 轻仓试探；确认进场 → 跟随买入；战役结束 → 持有；
- * 疑似退场 → 留意减仓；确认退场 → 跟随减仓；退场结束 / 无战役 → 空仓观望。
- * 不做任何仓位优化或择时增强，保持「抄作业」的原始语义。
+ * 不再机械映射：**疑似 + 证据强才试探 / 留意（弱疑似观望 / 持有）；
+ * 确认 + 证据强才跟随（弱确认降档为试探 / 留意）**。通过率 = 通过数 ÷
+ * 可判证据数（缺失不计分母）；全部缺失视为证据不足 → 一律按弱处理。
+ * @param lifecycle 生命周期状态
+ * @param evidences 证据列表（可空 = 无可判证据）
+ * @returns 建议档位与着色
+ */
+const gateAdviceAction = (
+  lifecycle: ShareLifecycleState,
+  evidences: readonly AdviceEvidence[],
+): { action: OperationAdviceAction; tone: 'up' | 'down' | 'flat' } => {
+  const judgeable = evidences.filter((item) => item.status !== 'missing');
+  const passCount = evidences.filter((item) => item.status === 'pass').length;
+  const ratio = judgeable.length > 0 ? passCount / judgeable.length : null;
+  const strong = ratio !== null && ratio >= ADVICE_FOLLOW_RATIO;
+  switch (lifecycle) {
+    case 'entry_suspected':
+      return strong ? { action: 'probe', tone: 'up' } : { action: 'flat', tone: 'flat' };
+    case 'entry_confirmed':
+      return strong ? { action: 'buy', tone: 'up' } : { action: 'probe', tone: 'up' };
+    case 'exit_suspected':
+      return strong ? { action: 'trim_watch', tone: 'down' } : { action: 'hold', tone: 'flat' };
+    case 'exit_confirmed':
+      return strong ? { action: 'sell', tone: 'down' } : { action: 'trim_watch', tone: 'down' };
+    case 'entry_done':
+    case 'holding':
+      return { action: 'hold', tone: 'flat' };
+    case 'exit_done':
+    case 'watching':
+      return { action: 'flat', tone: 'flat' };
+  }
+};
+
+/**
+ * 构建用户操作建议序列（纯函数，证据评分制）
+ *
+ * 口径：建议档位 = **生命周期门控 × 独立证据通过率**，两步走：
+ * 1. 每场战役按 5 项可复算证据评分（金额规模 / 确认速度 / 指数位置 /
+ *    主力同向 / 两融同向，口径见 makeEvidenceEvaluator）；
+ * 2. 通过率 ≥ ADVICE_FOLLOW_RATIO 才「升档」（确认 → 跟随进出、疑似 →
+ *    试探 / 留意），否则「降档」（确认 → 试探 / 留意、疑似 → 观望 / 持有）。
+ * 数据缺失的证据不参与评分（分数按可判项归一），不猜 0。
  *
  * 输出两份：
- * - `current`：最新交易日的建议，标题 / 说明追加**进行中战役**的上下文
- *   （确认第几天、段内累计净申赎金额），是界面上重点展示的对象；
- * - `changes`：建议发生变化的交易日列表（升序，含首日）——
- *   用户回看「哪些天该买过 / 该卖过」用，界面取尾部若干条展示。
+ * - `current`：最新交易日的建议（含证据明细 + 进行中战役的上下文），界面重点展示；
+ * - `changes`：建议档位发生变化的交易日列表（升序，含首日）。
  *
- * @param timeline 逐日信号（升序；buildShareSignalTimeline 输出）
- * @param campaigns 战役列表（升序；buildShareCampaigns 输出）
+ * @param input 建议输入（时间线 + 战役 + 组合序列 + 资金流 + 两融）
  * @returns 当前建议（无数据为 null）与建议变化点
  */
 export const buildOperationAdvice = (
-  timeline: readonly ShareSignalDay[],
-  campaigns: readonly ShareCampaignWave[],
+  input: OperationAdviceInput,
 ): { current: OperationAdvicePoint | null; changes: OperationAdvicePoint[] } => {
+  const { timeline, campaigns, comboPoints, dailyByCode, marginByCode } = input;
   if (timeline.length === 0) return { current: null, changes: [] };
 
-  // 逐日机械映射
+  const indexByDate = new Map(comboPoints.map((point, index) => [point.date, index] as const));
+
+  // 一个组合交易日最多属于一场战役（方向段不重叠）
+  const campaignByIdx = new Map<number, ShareCampaignWave>();
+  for (const campaign of campaigns) {
+    const startIdx = indexByDate.get(campaign.startDate);
+    const endIdx = indexByDate.get(campaign.endDate);
+    if (startIdx === undefined || endIdx === undefined) continue;
+    for (let i = startIdx; i <= endIdx; i += 1) campaignByIdx.set(i, campaign);
+  }
+
+  const evaluateEvidence = makeEvidenceEvaluator(
+    comboPoints,
+    drawdownPctSeries(comboPoints.map((point) => point.avgPrice)),
+    dailyByCode,
+    marginByCode,
+    indexByDate,
+  );
+
   const points: OperationAdvicePoint[] = timeline.map((day) => {
-    const mapped = ADVICE_BY_LIFECYCLE[day.lifecycle];
+    const comboIdx = indexByDate.get(day.date);
+    const campaign = comboIdx === undefined ? undefined : campaignByIdx.get(comboIdx);
+    // 证据只在「疑似 / 确认」状态下参与门控；观望 / 持仓 / 结束态无需评分
+    const scoringState =
+      day.lifecycle === 'entry_suspected' || day.lifecycle === 'entry_confirmed'
+      || day.lifecycle === 'exit_suspected' || day.lifecycle === 'exit_confirmed';
+    const evidences =
+      campaign !== undefined && comboIdx !== undefined && scoringState
+        ? evaluateEvidence(campaign, comboIdx)
+        : [];
+    const gated = gateAdviceAction(day.lifecycle, evidences);
+    const judgeable = evidences.filter((item) => item.status !== 'missing');
+    const passCount = evidences.filter((item) => item.status === 'pass').length;
     return {
       date: day.date,
-      action: mapped.action,
-      tone: mapped.tone,
-      title: BROAD_ADVICE_ACTION_LABEL[mapped.action],
-      detail: BROAD_ADVICE_ACTION_DETAIL[mapped.action],
+      action: gated.action,
+      tone: gated.tone,
+      title: BROAD_ADVICE_ACTION_LABEL[gated.action],
+      detail: BROAD_ADVICE_ACTION_DETAIL[gated.action],
+      scoreText: judgeable.length > 0 ? `${passCount}/${judgeable.length}` : '—',
+      evidences,
     };
   });
 

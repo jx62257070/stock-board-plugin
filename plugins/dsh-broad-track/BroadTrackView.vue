@@ -79,7 +79,9 @@ import {
   BROAD_BACKTEST_TITLE,
   BROAD_ADVICE_ACTION_CLASS,
   BROAD_ADVICE_ACTION_LABEL,
+  BROAD_ADVICE_EVIDENCE_MARK,
   BROAD_ADVICE_NOTE,
+  BROAD_ADVICE_SCORE_PREFIX,
   BROAD_ADVICE_TITLE,
   CAMPAIGN_CARD_MAX,
   NATIONAL_TEAM_OF_INST_RATIO,
@@ -529,13 +531,19 @@ const currentLifecycle = computed<ShareSignalDay['lifecycle'] | null>(
 );
 
 /**
- * 操作建议（生命周期 → 跟随者动作的机械映射）
+ * 操作建议（生命周期门控 × 独立证据通过率）
  *
- * current = 最新交易日建议（含进行中战役的上下文）；changes = 建议变化点
- * （升序全量），界面取尾部若干条展示「哪些天该买过 / 该卖过」。
+ * current = 最新交易日建议（含证据明细与进行中战役的上下文）；changes = 建议
+ * 变化点（升序全量），界面取尾部若干条展示「哪些天该买过 / 该卖过」。
  */
 const operationAdvice = computed(() =>
-  buildOperationAdvice(shareTimeline.value, shareCampaigns.value),
+  buildOperationAdvice({
+    timeline: shareTimeline.value,
+    campaigns: shareCampaigns.value,
+    comboPoints: comboSeries.value,
+    dailyByCode: snapshot.value.dailyByCode,
+    marginByCode: snapshot.value.marginByCode,
+  }),
 );
 
 /** 近期建议变化（最多 6 条，倒序展示） */
@@ -1381,7 +1389,7 @@ const shortDate = (date: string): string => date.slice(5);
         <p class="mt-3 text-xs leading-relaxed text-text-tertiary">{{ BROAD_WAVE_NOTE }}</p>
       </component>
 
-      <!-- 操作建议：生命周期 → 跟随者动作的机械映射 -->
+      <!-- 操作建议：生命周期门控 × 独立证据评分 -->
       <component :is="deps.ui.Card" v-if="operationAdvice.current" :title="BROAD_ADVICE_TITLE">
         <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <span
@@ -1390,6 +1398,12 @@ const shortDate = (date: string): string => date.slice(5);
           >
             {{ operationAdvice.current.title }}
           </span>
+          <span
+            v-if="operationAdvice.current.scoreText !== '—'"
+            class="rounded bg-flat-weak px-1.5 py-0.5 text-[11px] tabular-nums text-text-secondary"
+          >
+            {{ BROAD_ADVICE_SCORE_PREFIX }} {{ operationAdvice.current.scoreText }}
+          </span>
           <span class="text-[11px] text-text-tertiary">
             基于 {{ operationAdvice.current.date }} 收盘数据（{{ SHARE_LIFECYCLE_LABEL[currentLifecycle ?? 'watching'] }}）
           </span>
@@ -1397,6 +1411,24 @@ const shortDate = (date: string): string => date.slice(5);
         <p class="mt-2 text-xs leading-relaxed text-text-secondary">
           {{ operationAdvice.current.detail }}
         </p>
+        <ul
+          v-if="operationAdvice.current.evidences.length > 0"
+          class="mt-2 space-y-1"
+        >
+          <li
+            v-for="item in operationAdvice.current.evidences"
+            :key="item.key"
+            class="flex items-start gap-1.5 text-[11px] leading-relaxed"
+          >
+            <span
+              class="shrink-0 font-medium tabular-nums"
+              :class="item.status === 'pass' ? 'text-text' : 'text-text-tertiary'"
+            >
+              {{ BROAD_ADVICE_EVIDENCE_MARK[item.status] }} {{ item.label }}
+            </span>
+            <span class="text-text-tertiary">{{ item.detail }}</span>
+          </li>
+        </ul>
         <div v-if="recentAdviceChanges.length > 1" class="mt-3">
           <p class="text-[11px] font-medium text-text-tertiary">近期建议变化</p>
           <div class="mt-1 flex flex-wrap gap-1.5">
@@ -1406,7 +1438,7 @@ const shortDate = (date: string): string => date.slice(5);
               class="rounded bg-flat-weak px-1.5 py-0.5 text-[11px] tabular-nums"
               :class="BROAD_ADVICE_ACTION_CLASS[change.action]"
             >
-              {{ change.date.slice(5) }} {{ BROAD_ADVICE_ACTION_LABEL[change.action] }}
+              {{ change.date.slice(5) }} {{ BROAD_ADVICE_ACTION_LABEL[change.action] }}<template v-if="change.scoreText !== '—'">（{{ BROAD_ADVICE_SCORE_PREFIX }} {{ change.scoreText }}）</template>
             </span>
           </div>
         </div>
