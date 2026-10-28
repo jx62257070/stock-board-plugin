@@ -1227,7 +1227,7 @@ const shortDate = (date: string): string => date.slice(5);
                       :style="{ width: `${timelineDayWidth - 1}px`, height: `${Math.max(bar.height, 1)}%` }"
                     >
                       <div
-                        class="h-full w-full rounded-t-[1px]"
+                        class="h-full w-full"
                         :class="(bar.value ?? 0) >= 0 ? 'bg-up' : 'bg-down'"
                         style="opacity: 0.8"
                       />
@@ -1347,7 +1347,7 @@ const shortDate = (date: string): string => date.slice(5);
                   :key="index"
                   class="flex items-start gap-1.5 text-[11px] leading-relaxed text-text-secondary"
                 >
-                  <span class="mt-1.5 inline-block h-1 w-1 shrink-0 rounded-full bg-text-tertiary" />
+                  <span class="mt-1.5 inline-block h-1 w-1 shrink-0 rounded-full text-text-tertiary" style="background-color: currentColor" />
                   {{ evidence }}
                 </li>
               </ul>
@@ -1523,7 +1523,7 @@ const shortDate = (date: string): string => date.slice(5);
                 :key="index"
                 class="flex items-start gap-1.5 text-xs leading-relaxed text-text-secondary"
               >
-                <span class="mt-1.5 inline-block h-1 w-1 shrink-0 rounded-full bg-text-tertiary" />
+                <span class="mt-1.5 inline-block h-1 w-1 shrink-0 rounded-full text-text-tertiary" style="background-color: currentColor" />
                 {{ evidence }}
               </li>
             </ul>
