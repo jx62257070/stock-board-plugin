@@ -30,6 +30,7 @@ import {
   WATCH_WIDGET_POPOVER_MARKET_ROWS,
   WATCH_WIDGET_POPOVER_MAX_ROWS,
   WATCH_WIDGET_POPOVER_ROW_HEIGHT,
+  WATCH_WIDGET_POPOVER_TURNOVER_ROWS,
   WATCH_WIDGET_POPOVER_VIEW,
   WATCH_WIDGET_POPOVER_WIDTH,
   WATCH_WIDGET_POPOVER_WINDOW_URL,
@@ -200,6 +201,11 @@ export const openBarWindow = async (
 
 /**
  * 创建气泡窗口（隐藏态创建一次复用；尺寸与位置在每次展开前按行数设定）
+ *
+ * 气泡内嵌阈值编辑器要接键盘输入：`focusable: false`（WS_EX_NOACTIVATE）的窗口
+ * 收不到正规键盘焦点，输入框看着能打字、v-model 却拿不到值（IME 组合输入全丢），
+ * 保存按钮永远置灰 —— 2.4.1 起气泡改为可聚焦；摸鱼诉求只对盯盘条成立（无输入框），
+ * 盯盘条仍保持 `focusable: false`。
  * @returns 窗口句柄；创建失败返回 null
  */
 export const openPopoverWindow = async (): Promise<WebviewWindow | null> => {
@@ -218,7 +224,7 @@ export const openPopoverWindow = async (): Promise<WebviewWindow | null> => {
       alwaysOnTop: true,
       skipTaskbar: true,
       resizable: false,
-      focusable: false,
+      focusable: true,
       shadow: false,
       visible: false,
     });
@@ -246,11 +252,11 @@ export interface PopoverLayout {
  * 拆成独立纯查询函数：`positionPopover`（展开时，含尺寸）与
  * `movePopoverToBar`（拖动跟随，只平移不改尺寸）共用同一份几何口径，
  * 保证两条路径算出的落点一致。
- * 高度按内容视图区分：列表视图按行数（封顶 MAX_ROWS），热力 / 大盘视图为固定
- * 等效行数（`WATCH_WIDGET_POPOVER_HEATMAP_ROWS` / `WATCH_WIDGET_POPOVER_MARKET_ROWS`，
- * 与候选行数解耦）。
+ * 高度按内容视图区分：列表视图按行数（封顶 MAX_ROWS），热力 / 成交额为固定
+ * 等效行数（`WATCH_WIDGET_POPOVER_HEATMAP_ROWS` / `WATCH_WIDGET_POPOVER_TURNOVER_ROWS`），
+ * 大盘 / 新闻 / 热榜沿用 10 行等效（`WATCH_WIDGET_POPOVER_MARKET_ROWS`）。
  * @param bar 盯盘条窗口（定位基准）
- * @param rowCount 当前行数（列表视图决定气泡高度，封顶 MAX_ROWS；热力 / 大盘视图忽略）
+ * @param rowCount 当前行数（列表视图决定气泡高度，封顶 MAX_ROWS；其余视图忽略）
  * @param view 气泡内容视图（缺省列表，老调用兼容）
  * @returns 气泡布局
  */
@@ -267,9 +273,13 @@ export const computePopoverLayout = async (
   const rows =
     view === WATCH_WIDGET_POPOVER_VIEW.HEATMAP
       ? WATCH_WIDGET_POPOVER_HEATMAP_ROWS
-      : view === WATCH_WIDGET_POPOVER_VIEW.MARKET
-        ? WATCH_WIDGET_POPOVER_MARKET_ROWS
-        : Math.min(Math.max(rowCount, 1), WATCH_WIDGET_POPOVER_MAX_ROWS);
+      : view === WATCH_WIDGET_POPOVER_VIEW.TURNOVER
+        ? WATCH_WIDGET_POPOVER_TURNOVER_ROWS
+        : view === WATCH_WIDGET_POPOVER_VIEW.MARKET
+          || view === WATCH_WIDGET_POPOVER_VIEW.NEWS
+          || view === WATCH_WIDGET_POPOVER_VIEW.HOTBOARD
+          ? WATCH_WIDGET_POPOVER_MARKET_ROWS
+          : Math.min(Math.max(rowCount, 1), WATCH_WIDGET_POPOVER_MAX_ROWS);
   const logicalHeight =
     WATCH_WIDGET_POPOVER_HEADER_HEIGHT +
     rows * WATCH_WIDGET_POPOVER_ROW_HEIGHT +

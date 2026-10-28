@@ -14,7 +14,7 @@
  * 的全部贡献点（顶栏盯盘主体一并消失）。小组件只能缺席，不能同归于尽 ——
  * 所有分支都以 return 收尾，async 动作统一走 `safe()`，最后一丝意外交给调用方的 try/catch。
  */
-import { computed, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { isTauri } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { cursorPosition } from '@tauri-apps/api/window';
@@ -23,8 +23,14 @@ import type { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type { PhysicalPosition } from '@tauri-apps/api/dpi';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { NOTIFY_TONE } from '../../../host/constants/notify.constants';
+import {
+  MARKET_BOARD_SOURCES,
+  MARKET_BOARD_SOURCE_DEFAULT,
+  MARKET_NEWS_SOURCES,
+  MARKET_NEWS_SOURCE_DEFAULT,
+} from '../../../host/constants/market-data.constants';
 import { filterCandidatesByWatchlist } from '../candidates';
-import { WATCH_MARQUEE_TONE_BY_TREND } from '../constants';
+import { WATCH_ALERT_KIND, WATCH_MARQUEE_TONE_BY_TREND } from '../constants';
 import {
   WATCH_WIDGET_BAR_HEIGHT,
   WATCH_WIDGET_BAR_WIDTH,
@@ -42,9 +48,16 @@ import {
 } from './constants';
 import {
   LEGACY_WATCH_WIDGET_PLUGIN_ID,
+  isWidgetColor,
   legacyWidgetInstalled,
+  readBoardSource,
+  readNewsSource,
+  readStockColors,
   readWidgetConfig,
   rememberBarPosition,
+  rememberBoardSource,
+  rememberNewsSource,
+  rememberStockColors,
 } from './settings';
 import { buildWatchContextList, buildWatchWidgetRows } from './presenter';
 import {
@@ -58,15 +71,29 @@ import {
   type PhysicalRect,
 } from './windows';
 import type {
+  WatchWidgetAlertPayload,
+  WatchWidgetBoardPayload,
+  WatchWidgetBoardRow,
+  WatchWidgetColor,
+  WatchWidgetColorPayload,
   WatchWidgetHeatmapBoard,
   WatchWidgetIndexRow,
   WatchWidgetMountOptions,
+  WatchWidgetNewsItem,
+  WatchWidgetNewsPayload,
   WatchWidgetPopoverView,
   WatchWidgetPopoverViewPayload,
+  WatchWidgetTurnoverPayload,
+  WatchWidgetTurnoverRow,
+  WatchWidgetViewSourcePayload,
 } from './types';
 import type { MarketIndexQuote } from '../../../host/types/plugin.types';
+import type {
+  MarketBoardSource,
+  MarketNewsSource,
+} from '../../../host/types/market-data.types';
 
-/** 气泡热力 / 大盘视图的轮询间隔（毫秒；与市场总览「市场宽度」轮询同频）。
+/** 气泡外部数据视图（热力 / 大盘 / 成交额 / 新闻 / 热榜）的轮询间隔（毫秒；与市场总览「市场宽度」轮询同频）。
  * 仅在「气泡展开 && 对应视图激活」期间运行，收起 / 切走即停 */
 const VIEW_POLL_MS = 30_000;
 
@@ -97,7 +124,7 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
 
   // 必需能力一次性取齐后逐个判空
   // （解构成 const 再判空：只有 const 才能让 TS 在后续整段代码里持续收窄到非 undefined）
-  const { format, watchlist, stockOpen, marketStatus, theme, market, notify } = caps;
+  const { format, watchlist, stockOpen, marketStatus, theme, market, marketData, notify } = caps;
   const capEntries: ReadonlyArray<readonly [string, unknown]> = [
     ['app:watchlist', watchlist],
     ['app:stock-open', stockOpen],
@@ -148,9 +175,52 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
     filterCandidatesByWatchlist(repo.list(), watchlist.symbols()),
   );
 
+  /**
+   * 列表视图的渲染行数（候选行 + 分组头）：气泡 2.3.0 起按自选分组归组渲染，
+   * 窗口高度按**全展开**口径计算（折叠后底部留白可接受，不做精细重算）；
+   * 一票多组在每个所属组下都出现（与自选股页语义一致），无组候选落「未分组」桶
+   */
+  const listRowCount = computed(() => {
+    const symbols = candidates.value.map((candidate) => candidate.symbol);
+    if (symbols.length === 0) return 0;
+    const symbolSet = new Set(symbols);
+    let rowCount = 0;
+    let groupCount = 0;
+    const covered = new Set<string>();
+    for (const group of watchlist.groups()) {
+      const hits = [...symbolSet].filter((symbol) =>
+        group.stocks.some((stock) => stock.symbol === symbol),
+      );
+      if (hits.length === 0) continue;
+      groupCount += 1;
+      rowCount += hits.length;
+      for (const symbol of hits) covered.add(symbol);
+    }
+    const restCount = symbols.filter((symbol) => !covered.has(symbol)).length;
+    return rowCount + groupCount + (restCount > 0 ? 1 : 0);
+  });
+
+  /**
+   * 候选分类颜色映射（symbol → 色名；挂载时从插件 storage 水合）
+   *
+   * 持 reactive 副本而不是每次从 settings 现读：set-color 高频改写时
+   * 行载荷要立刻跟着变，且 settings 容器的响应式口径是宿主表单的内部约定，
+   * 不给「自定义键是否响应式」留赌注。
+   */
+  const colorBySymbol = ref<Record<string, WatchWidgetColor>>(readStockColors(settings));
+
+  /**
+   * 全量改写颜色映射：先改 reactive 副本（行载荷随之重算推送），再整表落库
+   * @param next 改写后的完整映射
+   */
+  const applyStockColors = (next: Record<string, WatchWidgetColor>): void => {
+    colorBySymbol.value = next;
+    rememberStockColors(settings, next);
+  };
+
   /** 推送给小组件窗口的展示行（引擎报价一变即重算） */
   const rows = computed(() =>
-    buildWatchWidgetRows(candidates.value, monitor.quotes.value, format),
+    buildWatchWidgetRows(candidates.value, monitor.quotes.value, format, colorBySymbol.value),
   );
 
   // ---------- 窗口句柄与显隐状态（仅主窗口侧持有） ----------
@@ -176,6 +246,30 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
   let heatBoards: WatchWidgetHeatmapBoard[] = [];
   /** 最近一次成功拉取的大盘指数快照（失败时保留旧值，气泡不闪空） */
   let indexRows: WatchWidgetIndexRow[] = [];
+  /** 最近一次成功拉取的成交额快照（失败时保留旧值，气泡不闪空） */
+  let turnoverPayload: WatchWidgetTurnoverPayload | null = null;
+  /** 最近一次成功拉取的新闻标题快照（失败时保留旧值，气泡不闪空） */
+  let newsPayload: WatchWidgetNewsPayload | null = null;
+  /** 最近一次成功拉取的热榜快照（失败时保留旧值，气泡不闪空） */
+  let boardPayload: WatchWidgetBoardPayload | null = null;
+  /** 新闻视图当前源（气泡 select 切换经 view-source 事件改写，落插件设置重启保持） */
+  let newsSource: string = MARKET_NEWS_SOURCE_DEFAULT;
+  /** 热榜视图当前平台（同上） */
+  let boardSource: string = MARKET_BOARD_SOURCE_DEFAULT;
+
+  // ---------- 源记忆水合（宿主有 app:market-data 才有意义；脏值由读取端回落默认） ----------
+  if (marketData) {
+    newsSource = readNewsSource(
+      settings,
+      MARKET_NEWS_SOURCES.map((option) => option.value),
+      MARKET_NEWS_SOURCE_DEFAULT,
+    );
+    boardSource = readBoardSource(
+      settings,
+      MARKET_BOARD_SOURCES.map((option) => option.value),
+      MARKET_BOARD_SOURCE_DEFAULT,
+    );
+  }
   /** 视图数据轮询定时器（undefined = 未在轮询） */
   let viewPollTimer: number | undefined;
   /** 光标轮询定时器 */
@@ -209,6 +303,24 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
   const pushIndexes = (): void => {
     if (!popoverWindow) return;
     void emit(WATCH_WIDGET_EVENTS.INDEXES, { indexes: indexRows });
+  };
+
+  /** 把成交额快照推给气泡窗口 */
+  const pushTurnover = (): void => {
+    if (!popoverWindow || turnoverPayload === null) return;
+    void emit(WATCH_WIDGET_EVENTS.TURNOVER, turnoverPayload);
+  };
+
+  /** 把新闻标题快照推给气泡窗口 */
+  const pushNews = (): void => {
+    if (!popoverWindow || newsPayload === null) return;
+    void emit(WATCH_WIDGET_EVENTS.NEWS, newsPayload);
+  };
+
+  /** 把热榜快照推给气泡窗口 */
+  const pushBoard = (): void => {
+    if (!popoverWindow || boardPayload === null) return;
+    void emit(WATCH_WIDGET_EVENTS.HOTBOARD, boardPayload);
   };
 
   // ---------- 气泡热力 / 大盘视图（数据走 app:market 可选消费） ----------
@@ -266,30 +378,190 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
     }
   };
 
+  // ---------- 气泡成交额 / 新闻 / 热榜视图（数据走 app:market-data 可选消费） ----------
+
+  /** 新闻 / 热榜载荷的条数上限（10 行视窗 + 滚动余量，避免整榜大载荷跨窗口推送） */
+  const VIEW_PAYLOAD_LIMIT = 20;
+
+  /**
+   * 元 → 亿 / 万亿切档文案（气泡成交额主行与均值行用）
+   * @param value 金额原值（元；null 透传为 `--`）
+   * @returns 格式化文案
+   */
+  const formatAmountYuan = (value: number | null): string => {
+    if (value === null) return '--';
+    if (Math.abs(value) >= 1e12) return `${(value / 1e12).toFixed(2)}万亿`;
+    return `${(value / 1e8).toFixed(2)}亿`;
+  };
+
+  /**
+   * 元 → 带符号亿元文案（环比 / 较 5 日均这类差值用）
+   * @param value 差值原值（元；null 透传为 `--`）
+   * @returns 格式化文案
+   */
+  const formatSignedAmountYuan = (value: number | null): string => {
+    if (value === null) return '--';
+    const yi = value / 1e8;
+    return `${yi > 0 ? '+' : ''}${yi.toFixed(2)}亿`;
+  };
+
+  /**
+   * 秒级时间戳 → 气泡新闻行时间文案（当日只显 HH:mm，往日显 MM-DD；行宽放不下完整日期）
+   * @param ctime 秒级 Unix 时间戳字符串（空串 / 非法值返回空串）
+   * @returns 时间文案
+   */
+  const formatNewsTime = (ctime: string): string => {
+    if (!ctime) return '';
+    const date = new Date(Number(ctime) * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+    const pad = (n: number): string => n.toString().padStart(2, '0');
+    const now = new Date();
+    const sameDay =
+      date.getFullYear() === now.getFullYear()
+      && date.getMonth() === now.getMonth()
+      && date.getDate() === now.getDate();
+    return sameDay
+      ? `${pad(date.getHours())}:${pad(date.getMinutes())}`
+      : `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  };
+
+  /** 拉一次实时成交额（同花顺 dq 域，市场总览「实时成交额」模块同源）→ 归一为载荷并推送 */
+  const fetchTurnover = async (): Promise<void> => {
+    if (!marketData) return;
+    try {
+      const snapshot = await marketData.fetchRealtimeTurnover();
+      const vsAverage5 =
+        snapshot.turnover !== null
+        && snapshot.averageTurnover5 !== null
+        && snapshot.averageTurnover5 !== 0
+        ? ((snapshot.turnover - snapshot.averageTurnover5) / snapshot.averageTurnover5) * 100
+        : null;
+      const rows: WatchWidgetTurnoverRow[] = [
+        {
+          label: '较上一日',
+          value: formatSignedAmountYuan(snapshot.turnoverChange),
+          tone:
+            snapshot.turnoverChange === null || snapshot.turnoverChange === 0
+              ? undefined
+              : snapshot.turnoverChange > 0
+                ? WATCH_MARQUEE_TONE_BY_TREND.up
+                : WATCH_MARQUEE_TONE_BY_TREND.down,
+        },
+        { label: '预测全天', value: formatAmountYuan(snapshot.predictTurnover) },
+        { label: '5 日均', value: formatAmountYuan(snapshot.averageTurnover5) },
+        { label: '60 日均', value: formatAmountYuan(snapshot.averageTurnover) },
+        {
+          label: '较 5 日均',
+          value: vsAverage5 === null ? '--' : `${vsAverage5 > 0 ? '+' : ''}${vsAverage5.toFixed(2)}%`,
+          tone: vsAverage5 === null || vsAverage5 === 0
+            ? undefined
+            : vsAverage5 > 0
+              ? WATCH_MARQUEE_TONE_BY_TREND.up
+              : WATCH_MARQUEE_TONE_BY_TREND.down,
+        },
+      ];
+      // 分时双线：与市场总览同口径的 0-100 x 轴 + 双序列最大值定标（viewBox 0 0 100 40）
+      const points = snapshot.points;
+      let spark: WatchWidgetTurnoverPayload['spark'] = null;
+      if (points.length >= 2) {
+        const max = Math.max(
+          ...points.map((point) => Math.max(point.turnover ?? 0, point.pre ?? 0)),
+          1,
+        );
+        const toPath = (pick: (point: (typeof points)[number]) => number | null): string =>
+          points
+            .map((point, index) => {
+              const x = (index / (points.length - 1)) * 100;
+              const y = 40 - ((pick(point) ?? 0) / max) * 38 - 1;
+              return `${index === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
+            })
+            .join(' ');
+        spark = { today: toPath((point) => point.turnover), pre: toPath((point) => point.pre) };
+      }
+      turnoverPayload = {
+        headline: formatAmountYuan(snapshot.turnover),
+        rows,
+        spark,
+      };
+      pushTurnover();
+    } catch (error) {
+      logger.warn(`实时成交额拉取失败（气泡保留旧数据）：${String(error)}`);
+    }
+  };
+
+  /** 拉一次当前源的新闻标题（气泡只显示标题）→ 归一为载荷并推送 */
+  const fetchNews = async (): Promise<void> => {
+    if (!marketData) return;
+    try {
+      const items = await marketData.fetchHotNews(newsSource as MarketNewsSource);
+      const headlines: WatchWidgetNewsItem[] = items
+        .slice(0, VIEW_PAYLOAD_LIMIT)
+        .map((item) => ({
+          title: item.title,
+          url: item.url,
+          timeText: formatNewsTime(item.ctime),
+        }));
+      newsPayload = { source: newsSource, items: headlines };
+      pushNews();
+    } catch (error) {
+      logger.warn(`热点新闻拉取失败（气泡保留旧数据）：${String(error)}`);
+    }
+  };
+
+  /** 拉一次当前平台的热股榜单 → 归一为载荷并推送 */
+  const fetchBoard = async (): Promise<void> => {
+    if (!marketData) return;
+    try {
+      const items = await marketData.fetchHotBoard(boardSource as MarketBoardSource);
+      const boardRows: WatchWidgetBoardRow[] = items.slice(0, VIEW_PAYLOAD_LIMIT).map((item) => {
+        const tone = WATCH_MARQUEE_TONE_BY_TREND[format.trend(item.changePct ?? 0)];
+        return {
+          symbol: item.symbol,
+          name: item.name,
+          price: format.price(item.price),
+          percent: format.percent(item.changePct),
+          tone,
+          heatLabel: item.heatLabel,
+        };
+      });
+      boardPayload = { source: boardSource, rows: boardRows };
+      pushBoard();
+    } catch (error) {
+      logger.warn(`热股榜单拉取失败（气泡保留旧数据）：${String(error)}`);
+    }
+  };
+
   /**
    * 按当前气泡视图拉取对应数据（轮询定时器回调 / 展开即拉共用）
-   * @param view 要拉数据的视图：只有热力（`HEATMAP`）与大盘（`MARKET`）有外部数据源，
-   *   列表视图（`LIST`）用的是引擎已推过的候选行，传进来等于空转 —— 上层 `syncViewPolling`
-   *   的门控已经把它挡在轮询之外
+   * @param view 要拉数据的视图：列表视图（`LIST`）用的是引擎已推过的候选行，
+   *   传进来等于空转 —— 上层 `syncViewPolling` 的门控已经把它挡在轮询之外
    */
   const fetchForView = (view: WatchWidgetPopoverView): void => {
     if (view === WATCH_WIDGET_POPOVER_VIEW.HEATMAP) safe(fetchHeatmap());
     else if (view === WATCH_WIDGET_POPOVER_VIEW.MARKET) safe(fetchIndexes());
+    else if (view === WATCH_WIDGET_POPOVER_VIEW.TURNOVER) safe(fetchTurnover());
+    else if (view === WATCH_WIDGET_POPOVER_VIEW.NEWS) safe(fetchNews());
+    else if (view === WATCH_WIDGET_POPOVER_VIEW.HOTBOARD) safe(fetchBoard());
   };
 
   /**
-   * 轮询门控：仅「气泡展开 && 热力 / 大盘视图激活 && 宿主有 app:market」时运行。
+   * 轮询门控：仅「气泡展开 && 视图有外部数据源且宿主能力可用」时运行。
    * 气泡收起、切回列表、插件销毁都会停表，不给上游留常驻请求。
-   * 同一会话内热力 ⇄ 大盘互切：定时器不重建，但立即拉一次新视图的数据
+   * 同一会话内视图互切：定时器不重建，但立即拉一次新视图的数据
    * （否则要等下一个 30s tick 才有数据，切换瞬间气泡还挂着上一个视图的旧内容）。
    */
   const syncViewPolling = (): void => {
+    const needsMarket =
+      popoverView === WATCH_WIDGET_POPOVER_VIEW.HEATMAP
+      || popoverView === WATCH_WIDGET_POPOVER_VIEW.MARKET;
+    const needsMarketData =
+      popoverView === WATCH_WIDGET_POPOVER_VIEW.TURNOVER
+      || popoverView === WATCH_WIDGET_POPOVER_VIEW.NEWS
+      || popoverView === WATCH_WIDGET_POPOVER_VIEW.HOTBOARD;
     const shouldPoll =
-      popoverVisible &&
-      popoverWindow !== null &&
-      market !== undefined &&
-      (popoverView === WATCH_WIDGET_POPOVER_VIEW.HEATMAP ||
-        popoverView === WATCH_WIDGET_POPOVER_VIEW.MARKET);
+      popoverVisible
+      && popoverWindow !== null
+      && ((needsMarket && market !== undefined) || (needsMarketData && marketData !== undefined));
     if (shouldPoll && viewPollTimer === undefined) {
       fetchedView = popoverView;
       fetchForView(popoverView);
@@ -309,7 +581,7 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
     if (!barWindow) return;
     if (!popoverWindow) popoverWindow = await openPopoverWindow();
     if (!popoverWindow) return;
-    await positionPopover(popoverWindow, barWindow, rows.value.length, popoverView);
+    await positionPopover(popoverWindow, barWindow, listRowCount.value, popoverView);
     popoverRect = await getWindowRect(popoverWindow);
     await popoverWindow.show().catch(() => undefined);
     popoverVisible = true;
@@ -484,6 +756,9 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
         pushLines();
         pushHeatmap();
         pushIndexes();
+        pushTurnover();
+        pushNews();
+        pushBoard();
       }),
     );
     unlistens.push(
@@ -492,21 +767,51 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
         const isValid =
           view === WATCH_WIDGET_POPOVER_VIEW.LIST ||
           view === WATCH_WIDGET_POPOVER_VIEW.HEATMAP ||
-          view === WATCH_WIDGET_POPOVER_VIEW.MARKET;
+          view === WATCH_WIDGET_POPOVER_VIEW.MARKET ||
+          view === WATCH_WIDGET_POPOVER_VIEW.TURNOVER ||
+          view === WATCH_WIDGET_POPOVER_VIEW.NEWS ||
+          view === WATCH_WIDGET_POPOVER_VIEW.HOTBOARD;
         if (!isValid) return;
         popoverView = view;
         syncViewPolling();
-        // 展开中按新视图重算尺寸（三视图互切会改变窗口高度与落点）
+        // 展开中按新视图重算尺寸（视图互切会改变窗口高度与落点）
         const popover = popoverWindow;
         const bar = barWindow;
         if (popoverVisible && popover && bar) {
           safe(
-            positionPopover(popover, bar, rows.value.length, view).then(() =>
+            positionPopover(popover, bar, listRowCount.value, view).then(() =>
               getWindowRect(popover).then((rect) => {
                 popoverRect = rect;
               }),
             ),
           );
+        }
+      }),
+    );
+    // 气泡里切新闻源 / 热榜平台：校验合法值 → 改记忆 + 落插件设置 → 立即重拉
+    // （该视图激活且气泡展开时才即时拉；否则只换记忆，等下次展开按新源取数）
+    unlistens.push(
+      await listen<WatchWidgetViewSourcePayload>(WATCH_WIDGET_EVENTS.VIEW_SOURCE, (event) => {
+        const { newsSource: nextNews, boardSource: nextBoard } = event.payload ?? {};
+        if (nextNews !== undefined) {
+          const legal = MARKET_NEWS_SOURCES.some((option) => option.value === nextNews);
+          if (legal && nextNews !== newsSource) {
+            newsSource = nextNews;
+            rememberNewsSource(settings, nextNews);
+            if (popoverVisible && popoverView === WATCH_WIDGET_POPOVER_VIEW.NEWS) {
+              safe(fetchNews());
+            }
+          }
+        }
+        if (nextBoard !== undefined) {
+          const legal = MARKET_BOARD_SOURCES.some((option) => option.value === nextBoard);
+          if (legal && nextBoard !== boardSource) {
+            boardSource = nextBoard;
+            rememberBoardSource(settings, nextBoard);
+            if (popoverVisible && popoverView === WATCH_WIDGET_POPOVER_VIEW.HOTBOARD) {
+              safe(fetchBoard());
+            }
+          }
         }
       }),
     );
@@ -535,7 +840,7 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
         ) {
           lastFollowAt = now;
           safe(
-            movePopoverToBar(popoverLive, barLive, rows.value.length, popoverView).then(() =>
+            movePopoverToBar(popoverLive, barLive, listRowCount.value, popoverView).then(() =>
               getWindowRect(popoverLive).then((rect) => {
                 popoverRect = rect;
               }),
@@ -552,7 +857,7 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
           const bar = barWindow;
           if (popoverVisible && popover && bar) {
             safe(
-              positionPopover(popover, bar, rows.value.length, popoverView).then(() =>
+              positionPopover(popover, bar, listRowCount.value, popoverView).then(() =>
                 getWindowRect(popover).then((rect) => {
                   popoverRect = rect;
                 }),
@@ -566,6 +871,54 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
       await listen<{ symbol: string }>(WATCH_WIDGET_EVENTS.OPEN_STOCK, (event) => {
         openStockInMain(event.payload.symbol);
       }),
+    );
+    // 气泡里点圆点换分类颜色：校验后改写映射（reactive 副本 + 落库），
+    // 行载荷随副本重算，现有 watch(rows, pushLines) 会自动把新颜色推回条 / 气泡
+    unlistens.push(
+      await listen<WatchWidgetColorPayload>(WATCH_WIDGET_EVENTS.SET_COLOR, (event) => {
+        const { symbol, color } = event.payload ?? {};
+        if (!symbol || !isWidgetColor(color)) return;
+        if (colorBySymbol.value[symbol] === color) return;
+        applyStockColors({ ...colorBySymbol.value, [symbol]: color });
+      }),
+    );
+
+    // 气泡里编辑阈值提醒：校验后写候选仓储（与顶栏盯盘面板同一份 repo，天然双向同步 ——
+    // repo 是响应式的，面板 computed 与本文件的 rows computed 都会跟着重算，
+    // watch(rows, pushLines) 随即把新阈值推回条 / 气泡）。setAlert 会把 armed 复位，
+    // 「改阈值视为重新开始」的语义与面板端 AlertEditor 完全一致。
+    unlistens.push(
+      await listen<WatchWidgetAlertPayload>(WATCH_WIDGET_EVENTS.SET_ALERT, (event) => {
+        const { symbol, clear, kind, above, value } = event.payload ?? {};
+        if (!symbol) return;
+        if (clear) {
+          repo.clearAlert(symbol);
+          return;
+        }
+        const legalKind = kind === WATCH_ALERT_KIND.PRICE || kind === WATCH_ALERT_KIND.CHANGE;
+        if (!legalKind || typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+          return;
+        }
+        repo.setAlert(symbol, { kind, above: above !== false, value });
+      }),
+    );
+
+    // ---------- 取消盯盘 → 清除该候选的颜色记忆 ----------
+    // 监听的是候选池本体（repo.list）而不是过滤后的 candidates：从自选股移除
+    // （候选还在池里）不算「取消盯盘」，颜色要保留 —— 用户说的规则是只有把股票
+    // 从盯盘里移出，下次再加回来才回落白色。
+    effect(() =>
+      watch(
+        () => repo.list().map((item) => item.symbol),
+        (symbols) => {
+          const live = new Set(symbols);
+          const current = colorBySymbol.value;
+          const kept = Object.entries(current).filter(([symbol]) => live.has(symbol));
+          if (kept.length === Object.keys(current).length) return;
+          applyStockColors(Object.fromEntries(kept));
+        },
+        { immediate: true },
+      ),
     );
 
     // ---------- 摸鱼显隐（hover 模式：离开超时隐藏，角落热区唤回） ----------

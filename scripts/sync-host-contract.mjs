@@ -9,12 +9,19 @@
  *
  * **为什么需要它**：插件源码要写 `PluginDefinition` / `FormatService` / `PLUGIN_LOG_PREFIX`
  * 这些宿主类型与常量，而本仓库是独立仓库 —— 不能 `import` 主 app 的 `src/`（那就不是独立仓库了）。
- * 于是把宿主源码里「被插件用到的那一小撮」**按原目录结构**拷到 `host/`：
- * 相对路径一层不变（只把 `../../` 换成 `../../host/`），闭包内的互相 import 也照样解析。
+ * 于是把宿主源码里「被插件用到的那一小撮」拷到 `host/` 快照。
  *
- * 从 `src/types` 与 `src/constants` 出发做**闭包**：被它们相对引用到的文件（如 `src/utils/format-price`）
- * 也一并拷进来，落位仍按它相对 `src/` 的路径 —— 因此 `host/` 里的 import 与宿主完全一致，
- * 不存在「拷过来就断了」的情况。
+ * **路径映射（2026-10-16，宿主重构出 src/common | pc | mobile 后引入）**：
+ * 宿主 `src/common/**` 与 `src/pc/**` 统一**剥掉首层目录**落位 ——
+ * `src/common/types/plugin.types.ts` → `host/types/plugin.types.ts`、
+ * `src/pc/plugins/watch-widget/constants.ts` → `host/plugins/watch-widget/constants.ts`。
+ * 快照布局因此与重构前一致，插件源码的 `../../host/types/...` 引用**零改动**。
+ * 代价是跨边界（common ⇄ pc）的相对 import 在快照里不再成立，所以拷贝时把
+ * 内容里的项目内相对 import **按映射重算**（先解析到 src 侧真实目标，再从
+ * 映射后的落位重算相对路径）；闭包解析仍按宿主原始路径进行，不受影响。
+ *
+ * 从种子文件出发做**闭包**：被相对引用到的文件也一并拷进来。
+ * 宿主改了契约 → 跑一次 `pnpm sync:host` → 类型层立刻暴露不兼容点。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -43,6 +50,14 @@ const resolveHostRoot = () => {
 const RELATIVE_SPECIFIER = /from\s+['"](\.[^'"]*)['"]/g;
 /** `export … from '…'` 与 `import type … from '…'` 同理 */
 const RELATIVE_EXPORT = /export\s+(?:\*|type)?\s*\{[^}]*\}\s*from\s+['"](\.[^'"]*)['"]/g;
+
+/**
+ * 宿主 src 相对路径 → 快照相对路径：剥掉首层的 `common/` 与 `pc/`
+ * （快照布局 = 重构前宿主 src 的扁平结构；mobile 不进契约，无需映射）
+ * @param rel 宿主 src 下的相对路径（posix）
+ * @returns 快照下的相对路径（posix）
+ */
+const mapRel = (rel) => rel.replace(/^(common|pc)\//, '');
 
 /**
  * 解析一条相对 import 指向的真实文件（按宿主 src 下的相对路径）
@@ -74,9 +89,44 @@ const resolveSpecifier = (hostSrc, fromDir, spec) => {
 const toAbsolute = (root, rel) => path.join(root, ...rel.split('/'));
 
 /**
+ * 重算一条相对 import：宿主侧解析到真实目标后，按快照映射落位重新计算相对路径
+ * @param hostSrc 宿主 src 目录
+ * @param relOriginal 引用方在宿主 src 下的相对路径（posix）
+ * @param spec import 里写的相对路径
+ * @returns 重算后的相对路径；解析不到目标时返回 null（保留原样，由类型检查兜底）
+ */
+const remapSpecifier = (hostSrc, relOriginal, spec) => {
+  const resolved = resolveSpecifier(hostSrc, path.posix.dirname(relOriginal), spec);
+  if (!resolved) return null;
+  const fromMapped = path.posix.dirname(mapRel(relOriginal));
+  const toMapped = mapRel(resolved);
+  const rebased = path.posix.relative(fromMapped, toMapped);
+  return rebased.startsWith('.') ? rebased : `./${rebased}`;
+};
+
+/**
+ * 拷贝前改写内容里的项目内相对 import（common ⇄ pc 跨边界的引用在快照里
+ * 不再成立，必须按映射重算；裸包名与解析不到的目标原样保留）
+ * @param content 宿主文件原文
+ * @param relOriginal 引用方在宿主 src 下的相对路径（posix）
+ * @param hostSrc 宿主 src 目录
+ * @returns 改写后的内容
+ */
+const rewriteImports = (content, relOriginal, hostSrc) =>
+  content
+    .replace(RELATIVE_SPECIFIER, (match, spec) => {
+      const remapped = remapSpecifier(hostSrc, relOriginal, spec);
+      return remapped === null ? match : match.replace(spec, remapped);
+    })
+    .replace(RELATIVE_EXPORT, (match, spec) => {
+      const remapped = remapSpecifier(hostSrc, relOriginal, spec);
+      return remapped === null ? match : match.replace(spec, remapped);
+    });
+
+/**
  * 从一个种子文件出发，收集闭包内的所有文件（按宿主 src 下的相对路径）
  * @param hostSrc 宿主 src 目录
- * @param seeds 种子（相对 src 的路径，如 `types/plugin.types.ts`）
+ * @param seeds 种子（相对 src 的路径，如 `common/types/plugin.types.ts`）
  * @returns 闭包文件清单（相对 src 的路径）
  */
 const collectClosure = (hostSrc, seeds) => {
@@ -112,23 +162,26 @@ const main = () => {
   const hostSrc = path.join(hostRoot, 'src');
   process.stdout.write(`宿主：${hostRoot}\n`);
 
-  // 种子 = 插件会直接引用的宿主类型 / 常量入口（不必列全，闭包会自动带出依赖）
+  // 种子 = 插件会直接引用的宿主类型 / 常量入口（不必列全，闭包会自动带出依赖）。
+  // 路径是 2026-10-16 重构后的 src 相对路径（common/ | pc/ 前缀，落位时被 mapRel 剥掉）
   const seeds = [
-    'types/plugin.types.ts',
-    'types/notify.types.ts',
-    'types/stock-quote.types.ts',
-    'types/table.types.ts',
-    'types/watch-widget.types.ts',
-    'constants/plugin.constants.ts',
-    'constants/trend.constants.ts',
-    'constants/watch-widget.constants.ts',
-    // 小组件窗口两端共享的「事件协议」常量：渲染端在宿主 src/plugins/watch-widget/，
+    'common/types/plugin.types.ts',
+    'common/types/notify.types.ts',
+    'common/types/stock-quote.types.ts',
+    'common/types/table.types.ts',
+    'common/types/watch-widget.types.ts',
+    'common/constants/plugin.constants.ts',
+    'common/constants/trend.constants.ts',
+    'common/constants/watch-widget.constants.ts',
+    // 市场资讯服务的源选项常量（成交额 / 新闻源 / 热榜平台的合法值与默认值）
+    'common/constants/market-data.constants.ts',
+    // 小组件窗口两端共享的「事件协议」常量：渲染端在宿主 src/pc/plugins/watch-widget/，
     // 插件产物经本快照引用同一份事实源，label / 事件名写岔一边窗口就静默失联
-    'plugins/watch-widget/constants.ts',
+    'pc/plugins/watch-widget/constants.ts',
   ];
   const files = collectClosure(hostSrc, seeds);
 
-  // 先清掉旧快照里不再属于闭包的文件，避免留下幽灵引用
+  // 先清掉旧快照里不再属于闭包的文件，避免留下幽灵引用（比较按映射后的落位）
   const previous = [];
   if (fs.existsSync(HOST_DIR)) {
     const walk = (dir, prefix) => {
@@ -140,7 +193,7 @@ const main = () => {
     };
     walk(HOST_DIR, '');
   }
-  const next = new Set(files);
+  const next = new Set(files.map(mapRel));
   const stale = [];
   for (const rel of previous) {
     if (next.has(rel)) continue;
@@ -156,9 +209,9 @@ const main = () => {
   let copied = 0;
   for (const rel of files) {
     const from = toAbsolute(hostSrc, rel);
-    const to = toAbsolute(HOST_DIR, rel);
+    const to = toAbsolute(HOST_DIR, mapRel(rel));
     fs.mkdirSync(path.dirname(to), { recursive: true });
-    const content = fs.readFileSync(from, 'utf8');
+    const content = rewriteImports(fs.readFileSync(from, 'utf8'), rel, hostSrc);
     if (fs.existsSync(to) && fs.readFileSync(to, 'utf8') === content) continue;
     fs.writeFileSync(to, content, 'utf8');
     copied += 1;
@@ -175,7 +228,8 @@ const main = () => {
       '# host —— 宿主契约快照（自动生成，勿手改）',
       '',
       '由 `node scripts/sync-host-contract.mjs` 从主 app（`../whf-stock-board`）的 `src/` 拷贝而来，',
-      '目录结构与宿主一致，因此快照内部的相对 import 与宿主完全等价。',
+      '`src/common/**` 与 `src/pc/**` 剥掉首层目录落位（快照布局 = 宿主重构前的扁平结构），',
+      '内容里项目内相对 import 已按映射重算，快照内部自洽。',
       '',
       '插件源码只引用这里的东西：`../../host/types/plugin.types`、`../../host/constants/plugin.constants` …',
       '宿主改了契约 → 跑一次 `pnpm sync:host` → 类型层立刻暴露不兼容点。',
@@ -187,7 +241,7 @@ const main = () => {
   );
 
   process.stdout.write(
-    files.map((file) => `  · ${file.split(path.sep).join('/')}`).join('\n') + '\n',
+    files.map((file) => `  · ${mapRel(file)}`).join('\n') + '\n',
   );
   process.stdout.write(
     `✓ 宿主契约快照：${files.length} 个文件（本次写入 ${copied} 个）→ host/\n`

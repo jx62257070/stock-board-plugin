@@ -81,17 +81,29 @@ export const WATCH_WIDGET_POPOVER_HEATMAP_TOP_N = 10;
 export const WATCH_WIDGET_POPOVER_MARKET_ROWS = 10;
 
 /**
+ * 气泡成交额视图的等效行数（高度计算口径同热力：总高 = 头部 40 + 5×34 + 底部 6 = 216）
+ *
+ * 内容净高 170px：主行大数字 + 指标行 + 分时双线刚好占满
+ */
+export const WATCH_WIDGET_POPOVER_TURNOVER_ROWS = 5;
+
+/**
  * 气泡内容视图（禁 enum：const 对象 + widget/types.ts 派生类型）
  *
- * list = 候选列表（默认）；heatmap = 板块热力（市场总览「板块热力」迷你版，
- * 仅展示无交互）；market = 大盘走势（上证 / 深证 / 创业板指 / 恒生四指数行情）。
- * 视图状态归渲染端持有，切换时经 popover-view 事件上报主窗口；头部图标按
- * list → heatmap → market 循环切换。
+ * list = 候选列表（默认，按自选分组归组渲染）；heatmap = 板块热力（市场总览
+ * 「板块热力」迷你版，仅展示无交互）；market = 大盘走势（市场总览同款 10 指数行情）；
+ * turnover = 实时成交额（市场总览「实时成交额」模块精简版）；
+ * news = 热点新闻（六源切换，只显示标题）；hotboard = 今天炒什么（五平台切换）。
+ * 视图状态归渲染端持有，切换时经 popover-view 事件上报主窗口；2.3.0 起视图
+ * 扩到 6 个，头部改用 select 下拉切换（原 icon 循环切换弃用）。
  */
 export const WATCH_WIDGET_POPOVER_VIEW = {
   LIST: 'list',
   HEATMAP: 'heatmap',
   MARKET: 'market',
+  TURNOVER: 'turnover',
+  NEWS: 'news',
+  HOTBOARD: 'hotboard',
 } as const satisfies Record<string, string>;
 
 /** 气泡与条的间距（逻辑像素） */
@@ -135,6 +147,16 @@ export const WATCH_WIDGET_EVENTS = {
   HEATMAP: 'watch-widget://heatmap',
   /** 主窗口 → 气泡：大盘指数快照（市场总览同款 10 指数，缺行即缺行；拉取成功才推送） */
   INDEXES: 'watch-widget://indexes',
+  /** 主窗口 → 气泡：实时成交额快照（市场总览「实时成交额」模块同源，拉取成功才推送） */
+  TURNOVER: 'watch-widget://turnover',
+  /** 主窗口 → 气泡：热点新闻标题快照（当前源，拉取成功才推送） */
+  NEWS: 'watch-widget://news',
+  /** 主窗口 → 气泡：热股榜单快照（当前平台，拉取成功才推送） */
+  HOTBOARD: 'watch-widget://hotboard',
+  /** 气泡 → 主窗口：切换新闻源 / 热榜平台（主窗口记忆后立即重拉并落插件设置） */
+  VIEW_SOURCE: 'watch-widget://view-source',
+  /** 气泡 → 主窗口：打开新闻原文页（主窗口用与热点新闻页同款的窗口逻辑打开） */
+  OPEN_URL: 'watch-widget://open-url',
   /** 盯盘条 → 主窗口：条被拖动（实时携带物理坐标；主窗口负责气泡跟随与落点记忆） */
   BAR_MOVED: 'watch-widget://bar-moved',
   /** 条 / 气泡 → 主窗口：打开某只股票（唤起主窗口 + 跳详情页，左列=盯盘候选） */
@@ -145,7 +167,60 @@ export const WATCH_WIDGET_EVENTS = {
    * 主题跟随必须走与行情数据同一条已验证的事件通道。
    */
   THEME: 'watch-widget://theme',
+  /** 气泡 → 主窗口：设置某只候选的分类颜色（主窗口持久化后随 lines 重新下发） */
+  SET_COLOR: 'watch-widget://set-color',
+  /** 气泡 → 主窗口：设置 / 清除某只候选的阈值提醒（主窗口写候选仓储后随 lines 重新下发） */
+  SET_ALERT: 'watch-widget://set-alert',
 } as const satisfies Record<string, string>;
+
+// ---------- 股票分类颜色（与宿主渲染端共享同一份事实源，改一边必须同步另一边） ----------
+
+/**
+ * 候选分类颜色取值（行首圆点，用于区分持仓 / 关注 / 其他）
+ *
+ * 存储与事件载荷里落的是**色名键**而非色值：色值只归渲染端映射，
+ * 将来调色不用迁移存量数据。取值字符串一个字都不能改（落了用户的 storage）。
+ */
+export const WATCH_WIDGET_COLOR = {
+  WHITE: 'white',
+  RED: 'red',
+  ORANGE: 'orange',
+  YELLOW: 'yellow',
+  BLUE: 'blue',
+  GREEN: 'green',
+  PURPLE: 'purple',
+  PINK: 'pink',
+} as const satisfies Record<string, string>;
+
+/** 分类颜色类型 */
+export type WatchWidgetColor = (typeof WATCH_WIDGET_COLOR)[keyof typeof WATCH_WIDGET_COLOR];
+
+/** 默认颜色：白色（未设置过分类的候选、以及取消盯盘后重新加入的候选都回落到它） */
+export const WATCH_WIDGET_COLOR_DEFAULT: WatchWidgetColor = WATCH_WIDGET_COLOR.WHITE;
+
+/** 色名 → 色值映射（渲染端圆点填充用；白色在浅色主题下靠描边辨识） */
+export const WATCH_WIDGET_COLOR_HEX: Record<WatchWidgetColor, string> = {
+  white: '#ffffff',
+  red: '#ef4444',
+  orange: '#f97316',
+  yellow: '#eab308',
+  blue: '#3b82f6',
+  green: '#22c55e',
+  purple: '#a855f7',
+  pink: '#ec4899',
+};
+
+/** 点击圆点循环切换的顺序（白 → 红 → 橙 → 黄 → 蓝 → 绿 → 紫 → 粉 → 白） */
+export const WATCH_WIDGET_COLOR_CYCLE: readonly WatchWidgetColor[] = [
+  WATCH_WIDGET_COLOR.WHITE,
+  WATCH_WIDGET_COLOR.RED,
+  WATCH_WIDGET_COLOR.ORANGE,
+  WATCH_WIDGET_COLOR.YELLOW,
+  WATCH_WIDGET_COLOR.BLUE,
+  WATCH_WIDGET_COLOR.GREEN,
+  WATCH_WIDGET_COLOR.PURPLE,
+  WATCH_WIDGET_COLOR.PINK,
+];
 
 // ---------- 设置取值（会落进用户插件 storage，取值字符串一个字都不能改） ----------
 
