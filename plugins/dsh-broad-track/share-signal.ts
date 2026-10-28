@@ -41,6 +41,7 @@ import {
   CAMPAIGN_SUSPECT_STREAK,
   EXIT_COMPLETION_CLEARED_PCT,
   EXIT_COMPLETION_LIGHT_PCT,
+  INST_RATIO_FALLBACK,
   SHARE_SPLIT_CONFIRM_DAYS,
   SHARE_SPLIT_PRICE_TOLERANCE,
   SHARE_SPLIT_RATIO_MAX,
@@ -53,7 +54,9 @@ import {
   SIGNAL_EXIT_STREAK,
 } from './constants';
 import type {
+  AnchorHolding,
   ComboSharePoint,
+  EtfHolderRow,
   EtfShareRow,
   ShareBacktestSample,
   ShareBacktestStat,
@@ -179,6 +182,196 @@ export const neutralizeShareSplits = (
       amountYi: row.price === null ? null : deltaYi * row.price,
     };
   });
+};
+
+/**
+ * 国家队持仓估算序列的单日点（组合口径）
+ */
+export interface NationalSeriesPoint {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 国家队估算持仓份额（亿份） */
+  nationalSharesYi: number;
+  /** 国家队估算持仓金额（亿元；当日全部缺价为 null） */
+  nationalAmountYi: number | null;
+}
+
+/** 一只 ETF 的估算准备产物：锚点 + 分摊比例 + 日频估算份额（前缀累加） */
+interface NationalPerEtf {
+  /** 日频估算：date → 估算份额（亿份；锚点报告期后才有键） */
+  estByDate: Map<string, number>;
+  /** 日频前值填充价：date → 最近已知收盘价（元；无价为 undefined） */
+  priceByDate: Map<string, number>;
+}
+
+/**
+ * 准备单只 ETF 的估算输入（纯函数）
+ *
+ * 锚点与分摊比例口径见 {@link buildNationalSeries}；本函数做三件事：
+ * 1. 定锚点（用户配置 > 最近持有人结构粗估；**两者皆无 → 该 ETF 不参与估算**，
+ *    不做「0 起算」兜底 —— 那会把锚点后的净申赎累计画成「国家队持仓增长」曲线，
+ *    严重误导。季度同步 / 锚点配置缺失时曲线整体不出现，读数行显示 —）；
+ * 2. 定分摊比例（机构比例 × 国家队占机构比例，机构比例缺失用兜底）；
+ * 3. 锚点报告期后逐日累计：仅「**确认**操作日」（生命周期 entry_confirmed /
+ *    exit_confirmed，即色带深色段）且 Δ份额方向与战役一致时计入
+ *    `Δ × 分摊比例`（低频操作假设，疑似段不计），价格前值填充。
+ * @param rawRows 份额行（任意顺序）
+ * @param holders 持有人结构行（任意顺序）
+ * @param anchor 用户锚点（可为 null）
+ * @param nationalOfInst 国家队占机构持仓比例（0-1）
+ * @param lifecycleByDate 日期 → 生命周期状态（信号引擎输出；缺失或疑似视为观望不动）
+ * @returns 估算准备产物；无份额行 / 无锚点依据 / 锚点后无数据时为 null
+ */
+const prepareNationalPerEtf = (
+  rawRows: readonly EtfShareRow[],
+  holders: readonly EtfHolderRow[],
+  anchor: AnchorHolding | null,
+  nationalOfInst: number,
+  lifecycleByDate: ReadonlyMap<string, ShareLifecycleState>,
+): NationalPerEtf | null => {
+  if (rawRows.length === 0) return null;
+  const rows = neutralizeShareSplits(rawRows);
+
+  // 分摊比例 = 机构持有比例 × 国家队占机构比例（机构比例缺失用兜底 0.6）
+  let instRatio: number | null = null;
+  let instRatioEnd = '';
+  for (const row of holders) {
+    if (row.instRatio !== null && row.periodEnd > instRatioEnd) {
+      instRatio = row.instRatio;
+      instRatioEnd = row.periodEnd;
+    }
+  }
+  const instShare = instRatio !== null ? instRatio / 100 : INST_RATIO_FALLBACK;
+  const nationalShare = instShare * nationalOfInst;
+
+  // 锚点：用户配置 > 最近一期持有人结构粗估；两者皆无 → 不参与估算（见 JSDoc 1）
+  let anchorSharesYi: number;
+  let anchorPeriodEnd: string;
+  if (anchor && Number.isFinite(anchor.sharesYi)) {
+    anchorSharesYi = anchor.sharesYi;
+    anchorPeriodEnd = anchor.periodEnd;
+  } else {
+    let latest: EtfHolderRow | null = null;
+    for (const row of holders) {
+      if (
+        row.totalSharesYi !== null &&
+        row.instRatio !== null &&
+        (latest === null || row.periodEnd > latest.periodEnd)
+      ) {
+        latest = row;
+      }
+    }
+    if (
+      latest &&
+      latest.totalSharesYi !== null &&
+      latest.instRatio !== null
+    ) {
+      anchorSharesYi = latest.totalSharesYi * (latest.instRatio / 100) * nationalOfInst;
+      anchorPeriodEnd = latest.periodEnd;
+    } else {
+      return null;
+    }
+  }
+
+  // 锚点报告期后逐日累计（低频操作假设：只计确认操作日）；价格前值填充
+  const estByDate = new Map<string, number>();
+  const priceByDate = new Map<string, number>();
+  let est = anchorSharesYi;
+  let lastPrice: number | undefined;
+  for (const row of rows) {
+    if (row.price !== null && row.price > 0) lastPrice = row.price;
+    if (row.date <= anchorPeriodEnd) continue;
+    const lifecycle = lifecycleByDate.get(row.date);
+    const isEntryDay = lifecycle === 'entry_confirmed' && row.deltaYi > 0;
+    const isExitDay = lifecycle === 'exit_confirmed' && row.deltaYi < 0;
+    if (isEntryDay || isExitDay) est += row.deltaYi * nationalShare;
+    estByDate.set(row.date, est);
+    if (lastPrice !== undefined) priceByDate.set(row.date, lastPrice);
+  }
+  if (estByDate.size === 0) return null;
+  return { estByDate, priceByDate };
+};
+
+/**
+ * 构建组合口径的「国家队持仓估算」日频序列（纯函数）
+ *
+ * 分层口径（与 `estimate.ts` 的 estimateEtf 同思想，但按**日频**滚动）：
+ * 1. **锚点层**：用户配置的锚点优先；否则取最近一期持有人结构
+ *    `总份额 × 机构比例 × 国家队占机构比例` 粗估；**两者皆无时该 ETF
+ *    不参与估算**（不做 0 起算兜底 —— 那会把锚点后的净申赎累计误画成
+ *    国家队持仓增长曲线；全部 ETF 都无依据时返回空数组，界面不画）；
+ * 2. **滚动层（低频操作假设）**：锚点后国家队**持有不动**，只在信号引擎
+ *    判定「**确认**操作」的日子（entry_confirmed / exit_confirmed，即色带
+ *    深色段）按 `机构比例 × 国家队占机构比例` 参与当日申赎（进场段计正 Δ、
+ *    退场段计负 Δ，方向不符的不计）。疑似段不算 —— 疑似覆盖的日子太多
+ *    （实测 168/193），会把「低频阶梯」稀释成准连续曲线；
+ *    ⚠️ 不要改成「每日净申赎等比例分摊」—— 数学上那只是组合总份额的
+ *    恒比例缩放（est = shares × 占比），曲线形状与组合折线完全相同，
+ *    信息量为零；确认日假设下曲线呈真阶梯，国家队独立行为才可见；
+ * 3. **折现层**：估算份额 × 当日收盘价（缺价前值填充）= 估算金额。
+ *
+ * ⚠️ **曲线从锚点报告期后第一天起画**：锚点前的国家队份额不可知，
+ * 画常数段会错误暗示「一直在持仓」。
+ *
+ * ⚠️ **这是推定而非确证**：持有人结构半年才披露一次，锚点天然滞后；
+ * 「疑似 / 确认操作日」由信号引擎给出（同一套三条件判定）。用途是
+ * 「趋势参考」，绝对数值仅供量级感受。
+ *
+ * @param sharesByCode 代码 → 份额行（任意顺序，内部折算中和 + 排序）
+ * @param holdersByCode 代码 → 持有人结构行（任意顺序）
+ * @param anchors 用户配置的锚点（优先于持有人结构粗估）
+ * @param nationalOfInst 国家队占机构持仓比例（0-1）
+ * @param lifecycleByDate 日期 → 生命周期状态（信号引擎输出；缺失或疑似视为观望不动）
+ * @returns 逐日估算序列（升序；全部 ETF 无可用锚点时为空数组）
+ */
+export const buildNationalSeries = (
+  sharesByCode: ReadonlyMap<string, readonly EtfShareRow[]>,
+  holdersByCode: ReadonlyMap<string, readonly EtfHolderRow[]>,
+  anchors: readonly AnchorHolding[],
+  nationalOfInst: number,
+  lifecycleByDate: ReadonlyMap<string, ShareLifecycleState> = new Map(),
+): NationalSeriesPoint[] => {
+  const anchorByCode = new Map(anchors.map((item) => [item.code, item]));
+  const prepared: NationalPerEtf[] = [];
+  for (const [code, rows] of sharesByCode.entries()) {
+    const item = prepareNationalPerEtf(
+      rows,
+      holdersByCode.get(code) ?? [],
+      anchorByCode.get(code) ?? null,
+      nationalOfInst,
+      lifecycleByDate,
+    );
+    if (item) prepared.push(item);
+  }
+  if (prepared.length === 0) return [];
+
+  // 日期并集（升序），逐日聚合各 ETF 的估算份额与金额
+  const dateSet = new Set<string>();
+  for (const item of prepared) {
+    for (const date of item.estByDate.keys()) dateSet.add(date);
+  }
+  const points: NationalSeriesPoint[] = [];
+  for (const date of [...dateSet].sort()) {
+    let sharesSum = 0;
+    let amountSum = 0;
+    let amountCount = 0;
+    for (const item of prepared) {
+      const est = item.estByDate.get(date);
+      if (est === undefined) continue;
+      sharesSum += est;
+      const price = item.priceByDate.get(date);
+      if (price !== undefined) {
+        amountSum += est * price;
+        amountCount += 1;
+      }
+    }
+    points.push({
+      date,
+      nationalSharesYi: sharesSum,
+      nationalAmountYi: amountCount > 0 ? amountSum : null,
+    });
+  }
+  return points;
 };
 
 /**

@@ -15,11 +15,13 @@ import {
 } from './estimate';
 import {
   buildComboSeries,
+  buildNationalSeries,
   buildShareCampaigns,
   buildShareSignalTimeline,
   recentNetFlow,
   runShareBacktest,
 } from './share-signal';
+import type { NationalSeriesPoint } from './share-signal';
 import { syncShareSeries } from './share-sync';
 import {
   ANCHOR_DEFAULT_PERIOD,
@@ -421,6 +423,73 @@ const comboSeries = computed<ComboSharePoint[]>(() =>
 
 /** 是否有份额数据 */
 const hasShares = computed(() => comboSeries.value.length > 0);
+
+/**
+ * 国家队持仓估算序列（日频；锚点 + 确认操作日按占比参与申赎）
+ *
+ * 纯前端现算：输入全来自仓储快照与信号时间线（改锚点 / 调设置 / 刷新后自动重算）。
+ * 依赖 shareTimeline 的生命周期判定（低频操作假设，见 buildNationalSeries）。
+ */
+const nationalSeries = computed<NationalSeriesPoint[]>(() =>
+  buildNationalSeries(
+    snapshot.value.sharesByCode,
+    snapshot.value.holdersByCode,
+    snapshot.value.anchors,
+    nationalShare.value,
+    new Map(shareTimeline.value.map((day) => [day.date, day.lifecycle])),
+  ),
+);
+
+/** 国家队估算序列按日期索引（读数行查值用） */
+const nationalByDate = computed(() => {
+  const map = new Map<string, NationalSeriesPoint>();
+  for (const point of nationalSeries.value) map.set(point.date, point);
+  return map;
+});
+
+/** 读数行 / 悬停日可见的国家队估算点（null = 该日无估算，如锚点前） */
+const activeNationalPoint = computed<NationalSeriesPoint | null>(() => {
+  const date = readoutDate.value;
+  if (date === '') return null;
+  return nationalByDate.value.get(date) ?? null;
+});
+
+/**
+ * 国家队估算曲线路径（份额折线行内叠加的虚线）
+ *
+ * ⚠️ **独立归一**：国家队持仓是组合总份额的子集，量级只有两三成，
+ * 沿用组合折线的 min/max 归一会整条压在底部失去形状；这里用估算序列
+ * 自身的 min/max 铺满行高（与 sharePath 同一 viewBox 0..100），
+ * 图例与读数行明示「量纲独立，看趋势不看刻度」。
+ */
+const nationalPath = computed(() => {
+  const national = nationalSeries.value;
+  const list = comboSeries.value;
+  if (national.length < 2 || list.length < 2) return '';
+  // 估算点 → 组合序列索引（x 坐标必须与折线同一时间刻度）
+  const indexByDate = new Map<string, number>();
+  list.forEach((point, index) => indexByDate.set(point.date, index));
+  const values = national.map((point) => point.nationalSharesYi);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const height = 100;
+  const segments: string[] = [];
+  let open = false;
+  for (const point of national) {
+    const index = indexByDate.get(point.date);
+    if (index === undefined) {
+      open = false; // 该日在组合序列之外（理论上不会发生），断线防御
+      continue;
+    }
+    const w = timelineDayWidth.value;
+    const x = index * w + w / 2;
+    const y = height - ((point.nationalSharesYi - min) / span) * height;
+    segments.push(`${open ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`);
+    open = true;
+  }
+  return segments.join(' ');
+});
 
 /** 逐日份额信号（图表标注用） */
 const shareTimeline = computed<ShareSignalDay[]>(() =>
@@ -1074,6 +1143,15 @@ const shortDate = (date: string): string => date.slice(5);
             <span class="tabular-nums text-text">
               总份额 {{ activeTimelinePoint ? activeTimelinePoint.totalSharesYi.toFixed(0) : '—' }} 亿份
             </span>
+            <span class="tabular-nums text-text-tertiary">
+              国家队估算 {{
+                activeNationalPoint === null
+                  ? '—'
+                  : `${activeNationalPoint.nationalSharesYi.toFixed(0)} 亿份`
+              }}<template v-if="activeNationalPoint?.nationalAmountYi !== null && activeNationalPoint?.nationalAmountYi !== undefined">
+                ≈ {{ activeNationalPoint.nationalAmountYi.toFixed(0) }} 亿元
+              </template>
+            </span>
             <span
               v-if="activeTimelineSignal"
               class="rounded-full px-2 py-0.5 text-[11px] font-medium"
@@ -1102,7 +1180,9 @@ const shortDate = (date: string): string => date.slice(5);
               <!-- 三行共用十字焦点线的容器 -->
               <div class="relative">
                 <!-- 行1：组合总份额折线（独立一行，不被柱子遮挡） -->
-                <p class="sticky left-0 text-xs font-medium text-text-secondary">组合总份额</p>
+                <p class="sticky left-0 text-xs font-medium text-text-secondary">
+                  组合总份额<span v-if="nationalPath" class="font-normal text-text-tertiary">（虚线 = 国家队估算，量纲独立）</span>
+                </p>
                 <div class="relative mt-1" :style="{ height: `${flowRowHeight}px` }">
                   <svg
                     class="pointer-events-none absolute h-full w-full"
@@ -1110,7 +1190,7 @@ const shortDate = (date: string): string => date.slice(5);
                     :viewBox="`0 0 ${timelineWidth} 100`"
                     preserveAspectRatio="none"
                     role="img"
-                    aria-label="组合总份额走势"
+                    aria-label="组合总份额走势与国家队估算持仓"
                   >
                     <!-- sharePath 是路径语法（M/L），必须用 path 的 d 属性；polyline points 只认坐标对 -->
                     <path
@@ -1120,6 +1200,19 @@ const shortDate = (date: string): string => date.slice(5);
                       stroke-width="2"
                       vector-effect="non-scaling-stroke"
                       class="text-primary"
+                    />
+                    <!-- 国家队估算持仓：独立归一的虚线，只示意趋势（锚点前无数据自然断线）。
+                         色彩用白名单内的中性灰（plugin-classes.txt 无 text-warning）。 -->
+                    <path
+                      v-if="nationalPath"
+                      :d="nationalPath"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-dasharray="5 3"
+                      vector-effect="non-scaling-stroke"
+                      class="text-text-secondary"
+                      style="opacity: 0.95"
                     />
                   </svg>
                 </div>

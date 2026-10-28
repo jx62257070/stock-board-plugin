@@ -16,3 +16,10 @@ pnpm lint --max-warnings=0
 # 自检用固化下来的真实上游样本断言「能剥出 content + 列序 + 数值口径」，
 # 把这类「静默归零」挡在提交之前。
 pnpm check:parse
+
+# 全插件版本号一致性（manifest.json vs plugin.ts 导出常量）
+#
+# 2026-10-28 踩坑：broad-track 升 1.2.13 只改了 manifest，plugin.ts 里的
+# version 常量漏改，CI 打包校验拦截后才暴露。两处是手工维护的重复字段，
+# 本地提交时就校验，别等 CI。
+pnpm check:versions
