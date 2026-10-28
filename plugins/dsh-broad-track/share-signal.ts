@@ -40,8 +40,10 @@ import {
   ADVICE_EVIDENCE_WINDOW_DAYS,
   ADVICE_ENTER_DEEP_DD_PCT,
   ADVICE_EXIT_NEAR_HIGH_PCT,
-  ADVICE_FAST_CONFIRM_DAYS,
-  ADVICE_FOLLOW_RATIO,
+  ADVICE_FAST_CONFIRM_DAYS_ENTER,
+  ADVICE_FAST_CONFIRM_DAYS_EXIT,
+  ADVICE_FOLLOW_RATIO_ENTER,
+  ADVICE_FOLLOW_RATIO_EXIT,
   ADVICE_STRONG_AMOUNT_FACTOR,
   BACKTEST_HOLD_DAYS,
   CAMPAIGN_SILENT_END_DAYS,
@@ -1115,11 +1117,11 @@ const adviceThresholdOf = (level: 'enter' | 'exit'): number =>
  * 口径（全部只用截至当日的数据，无前视）：
  * - **金额规模**：段内累计净申赎 ≥ 门槛 × ADVICE_STRONG_AMOUNT_FACTOR
  *   （确认本身只要求 1 倍门槛，2 倍才算「强战役」）；
- * - **确认速度**：段起始到当日 ≤ ADVICE_FAST_CONFIRM_DAYS 个交易日
- *   （国家队级动作通常一口气完成，拖 10 天的更像散户 / 险资的分散行为）；
- * - **指数位置**：进场 = 距前高回撤 ≤ ADVICE_ENTER_DEEP_DD_PCT（比确认门槛
- *   -8% 更深，越深越像护盘）；退场 = 距前高 ≥ ADVICE_EXIT_NEAR_HIGH_PCT
- *   （比确认门槛 -2% 更贴前高，高位派发才危险）；
+ * - **确认速度**：段起始到当日 ≤ ADVICE_FAST_CONFIRM_DAYS_ENTER / EXIT 个
+ *   交易日（进退场分档：进场急战才真，退场天然拖尾放宽到 8 日）；
+ * - **指数位置**：进场 = 距前高回撤 ≤ ADVICE_ENTER_DEEP_DD_PCT（越深越像护盘）；
+ *   退场 = 距前高 ≥ ADVICE_EXIT_NEAR_HIGH_PCT（比确认门槛 -2% 更贴前高，
+ *   高位派发才危险）；
  * - **主力同向**：近 ADVICE_EVIDENCE_WINDOW_DAYS 日清单主力净流入合计与
  *   战役同向（国家队一级申赎通常伴随二级市场主力流入 / 流出）；
  * - **两融同向（共振口径）**：近 ADVICE_EVIDENCE_WINDOW_DAYS 日清单融资
@@ -1186,13 +1188,14 @@ const makeEvidenceEvaluator = (
         + `${Math.abs(flow) >= strongFlow ? '达到' : '未达到'}强度线 ${strongFlow} 亿元（确认门槛 ${threshold} 亿 × ${ADVICE_STRONG_AMOUNT_FACTOR}）`,
     });
 
-    // ② 确认速度
+    // ② 确认速度（进退场分档：国家队撤退天然拖尾，退场口径放宽）
+    const fastDays = enter ? ADVICE_FAST_CONFIRM_DAYS_ENTER : ADVICE_FAST_CONFIRM_DAYS_EXIT;
     const days = startIdx === undefined ? 0 : asOfIdx - startIdx + 1;
     evidences.push({
       key: 'speed',
       label: '确认速度',
-      status: days > 0 && days <= ADVICE_FAST_CONFIRM_DAYS ? 'pass' : 'fail',
-      detail: `历时 ${days} 个交易日，${days <= ADVICE_FAST_CONFIRM_DAYS ? '急战形态（国家队级动作通常一口气完成）' : '拖沓阴跌 / 缓涨，更像分散资金行为'}`,
+      status: days > 0 && days <= fastDays ? 'pass' : 'fail',
+      detail: `历时 ${days} 个交易日，${days <= fastDays ? '急战形态（国家队级动作通常一口气完成）' : '拖沓阴跌 / 缓涨，更像分散资金行为'}`,
     });
 
     // ③ 指数位置
@@ -1289,7 +1292,9 @@ const gateAdviceAction = (
   const judgeable = evidences.filter((item) => item.status !== 'missing');
   const passCount = evidences.filter((item) => item.status === 'pass').length;
   const ratio = judgeable.length > 0 ? passCount / judgeable.length : null;
-  const strong = ratio !== null && ratio >= ADVICE_FOLLOW_RATIO;
+  const enter = lifecycle === 'entry_suspected' || lifecycle === 'entry_confirmed';
+  const ratioLine = enter ? ADVICE_FOLLOW_RATIO_ENTER : ADVICE_FOLLOW_RATIO_EXIT;
+  const strong = ratio !== null && ratio >= ratioLine;
   switch (lifecycle) {
     case 'entry_suspected':
       return strong ? { action: 'probe', tone: 'up' } : { action: 'flat', tone: 'flat' };
@@ -1314,7 +1319,7 @@ const gateAdviceAction = (
  * 口径：建议档位 = **生命周期门控 × 独立证据通过率**，两步走：
  * 1. 每场战役按 5 项可复算证据评分（金额规模 / 确认速度 / 指数位置 /
  *    主力同向 / 两融同向，口径见 makeEvidenceEvaluator）；
- * 2. 通过率 ≥ ADVICE_FOLLOW_RATIO 才「升档」（确认 → 跟随进出、疑似 →
+ * 2. 通过率 ≥ 对应方向门槛（进场 ADVICE_FOLLOW_RATIO_ENTER、退场 ADVICE_FOLLOW_RATIO_EXIT）才「升档」（确认 → 跟随进出、疑似 →
  *    试探 / 留意），否则「降档」（确认 → 试探 / 留意、疑似 → 观望 / 持有）。
  * 数据缺失的证据不参与评分（分数按可判项归一），不猜 0。
  *
