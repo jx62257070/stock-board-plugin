@@ -10,12 +10,14 @@
  */
 import { PLUGIN_STATUS } from '../../../host/constants/plugin.constants';
 import {
+  WATCH_WIDGET_COLOR,
   WATCH_WIDGET_HIDE_DELAY_SEC_DEFAULT,
   WATCH_WIDGET_MODE,
   WATCH_WIDGET_MODE_DEFAULT,
   WATCH_WIDGET_POWER,
   WATCH_WIDGET_POWER_DEFAULT,
 } from './constants';
+import type { WatchWidgetColor } from './constants';
 import type {
   PluginRuntimeReader,
   PluginSettingsDeclaration,
@@ -35,6 +37,12 @@ export const WIDGET_SETTING_KEYS = {
   HIDE_DELAY_SEC: 'widgetHideDelaySec',
   /** 拖动落点：**不出现在表单里**，由插件自行 set 回写（宿主没有坐标控件） */
   POSITION: 'widgetPosition',
+  /** 候选分类颜色映射（symbol → 色名）：不出现在表单里，由气泡圆点交互回写 */
+  STOCK_COLORS: 'widgetStockColors',
+  /** 气泡新闻视图的当前源：不出现在表单里，由气泡 select 交互回写（重启保持） */
+  NEWS_SOURCE: 'widgetNewsSource',
+  /** 气泡热榜视图的当前平台：不出现在表单里，同上 */
+  BOARD_SOURCE: 'widgetBoardSource',
 } as const;
 
 /** 隐藏延时的合法区间（同时给宿主表单 min/max 与读取端兜底 clamp） */
@@ -171,6 +179,46 @@ export const readWidgetConfig = (settings: PluginSettingsStore): WatchWidgetConf
 };
 
 /**
+ * 色名取值是否合法（存储里可能躺着老版本或手改的脏值，未知色名一律回落白色）
+ * @param value 存储里的原始值
+ * @returns 是否为合法色名
+ */
+export const isWidgetColor = (value: unknown): value is WatchWidgetColor =>
+  (Object.values(WATCH_WIDGET_COLOR) as string[]).includes(value as string);
+
+/**
+ * 读候选分类颜色映射（symbol → 色名）
+ *
+ * 存储形态是普通对象；脏条目（色名不合法）直接丢弃而不是回落 ——
+ * 回落白色等价于「没设过」，丢弃后映射更干净，下次全量回写也不会把脏值带回库。
+ * @param settings 插件设置存取句柄
+ * @returns 归一化后的颜色映射（无有效条目时为空对象）
+ */
+export const readStockColors = (
+  settings: PluginSettingsStore,
+): Record<string, WatchWidgetColor> => {
+  const raw = settings.get<unknown>(WIDGET_SETTING_KEYS.STOCK_COLORS, null);
+  if (typeof raw !== 'object' || raw === null) return {};
+  const result: Record<string, WatchWidgetColor> = {};
+  for (const [symbol, color] of Object.entries(raw as Record<string, unknown>)) {
+    if (symbol && isWidgetColor(color)) result[symbol] = color;
+  }
+  return result;
+};
+
+/**
+ * 全量回写候选分类颜色映射（调用方先改自己的 reactive 副本，再整表落库）
+ * @param settings 插件设置存取句柄
+ * @param colors 回写后的完整映射
+ */
+export const rememberStockColors = (
+  settings: PluginSettingsStore,
+  colors: Readonly<Record<string, WatchWidgetColor>>,
+): void => {
+  settings.set(WIDGET_SETTING_KEYS.STOCK_COLORS, colors);
+};
+
+/**
  * 拖动落点回写（写的是**未声明**的键：宿主表单没有坐标控件，但 set 支持任意可序列化键）
  * @param settings 插件设置存取句柄
  * @param position 拖动落点（物理像素）
@@ -180,6 +228,56 @@ export const rememberBarPosition = (
   position: WatchWidgetPosition,
 ): void => {
   settings.set(WIDGET_SETTING_KEYS.POSITION, position);
+};
+
+/**
+ * 读气泡新闻视图的当前源（脏值 / 未设置回落默认值）
+ * @param settings 插件设置存取句柄
+ * @param legalSources 合法源全集（服务可用性随宿主版本变化，未知源回落默认）
+ * @param fallback 默认源
+ * @returns 当前源
+ */
+export const readNewsSource = (
+  settings: PluginSettingsStore,
+  legalSources: readonly string[],
+  fallback: string,
+): string => {
+  const raw = settings.get<unknown>(WIDGET_SETTING_KEYS.NEWS_SOURCE, fallback);
+  return typeof raw === 'string' && legalSources.includes(raw) ? raw : fallback;
+};
+
+/**
+ * 读气泡热榜视图的当前平台（脏值 / 未设置回落默认值）
+ * @param settings 插件设置存取句柄
+ * @param legalPlatforms 合法平台全集
+ * @param fallback 默认平台
+ * @returns 当前平台
+ */
+export const readBoardSource = (
+  settings: PluginSettingsStore,
+  legalPlatforms: readonly string[],
+  fallback: string,
+): string => {
+  const raw = settings.get<unknown>(WIDGET_SETTING_KEYS.BOARD_SOURCE, fallback);
+  return typeof raw === 'string' && legalPlatforms.includes(raw) ? raw : fallback;
+};
+
+/**
+ * 回写气泡新闻视图的当前源（气泡 select 交互触发；持久化让重启后仍保持）
+ * @param settings 插件设置存取句柄
+ * @param source 目标源
+ */
+export const rememberNewsSource = (settings: PluginSettingsStore, source: string): void => {
+  settings.set(WIDGET_SETTING_KEYS.NEWS_SOURCE, source);
+};
+
+/**
+ * 回写气泡热榜视图的当前平台（同上）
+ * @param settings 插件设置存取句柄
+ * @param source 目标平台
+ */
+export const rememberBoardSource = (settings: PluginSettingsStore, source: string): void => {
+  settings.set(WIDGET_SETTING_KEYS.BOARD_SOURCE, source);
 };
 
 /**

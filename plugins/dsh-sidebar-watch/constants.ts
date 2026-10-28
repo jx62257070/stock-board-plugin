@@ -175,3 +175,11 @@ export const WATCH_POLL_INTERVAL_MS = 4_000;
 
 /** 自选股页路由（命令「打开自选股页」与面板底部入口共用） */
 export const WATCHLIST_ROUTE_PATH = '/watchlist';
+
+/**
+ * 顶栏下拉面板「分组收起状态」的 localStorage 键
+ *
+ * 面板是「点开挂载、收起卸载」的临时组件，组件内状态活不过一次开关 ——
+ * 收起记忆必须落 localStorage 才有意义（默认全部展开）
+ */
+export const WATCH_HEADER_COLLAPSED_STORAGE_KEY = 'dsh-sidebar-watch-header-collapsed-groups';

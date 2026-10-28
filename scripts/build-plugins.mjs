@@ -51,6 +51,8 @@ const TARGETS = [
   { id: 'dsh-quick-note', entry: 'plugin.ts' },
   { id: 'dsh-sidebar-watch', entry: 'plugin.ts' },
   { id: 'dsh-broad-track', entry: 'plugin.ts' },
+  { id: 'dsh-stock-screener', entry: 'plugin.ts' },
+  { id: 'csw-active-cap-index', entry: 'plugin.ts' },
 ];
 
 /** 运行时桥的全局键（与宿主 `src/constants/plugin.constants.ts` 保持一致） */
