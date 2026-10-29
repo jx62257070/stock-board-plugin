@@ -837,6 +837,29 @@ const shareColumns: TableColumn<ShareRowView>[] = [
 /** 份额明细表最小宽度 */
 const shareMinWidth = 900;
 
+// 宿主 BaseTable 的 rowKey 契约是「函数 (row) => string」；
+// 传字符串会让模板里 rowKey(row) 调用抛 TypeError、整表渲染失败（1.2.20 前的教训）。
+/**
+ * 份额明细表行 key
+ * @param row 表行
+ * @returns 行 key（ETF 代码）
+ */
+const shareRowKey = (row: ShareRowView): string => row.code;
+
+/**
+ * 宽基明细表行 key
+ * @param row 表行
+ * @returns 行 key（ETF 代码）
+ */
+const tableRowKey = (row: EtfRowView): string => row.code;
+
+/**
+ * 季度申赎表行 key
+ * @param row 表行
+ * @returns 行 key（季度截止日）
+ */
+const quarterRowKey = (row: QuarterRowView): string => row.periodEnd;
+
 /**
  * 同步份额序列（用户点击触发；增量入库，只补缺失日期）
  */
@@ -1483,7 +1506,7 @@ const shortDate = (date: string): string => date.slice(5);
           :is="deps.ui.Table"
           :columns="shareColumns"
           :rows="shareRows"
-          row-key="code"
+          :row-key="shareRowKey"
           :min-width="shareMinWidth"
         >
           <template #name="{ row }">
@@ -1654,7 +1677,7 @@ const shortDate = (date: string): string => date.slice(5);
           :is="deps.ui.Table"
           :columns="tableColumns"
           :rows="tableRows"
-          row-key="code"
+          :row-key="tableRowKey"
           :min-width="tableMinWidth"
         >
           <template #name="{ row }">
@@ -1721,7 +1744,7 @@ const shortDate = (date: string): string => date.slice(5);
           :is="deps.ui.Table"
           :columns="quarterColumns"
           :rows="quarterRows"
-          row-key="periodEnd"
+          :row-key="quarterRowKey"
           :min-width="quarterMinWidth"
         >
           <template #etfName="{ row }">
