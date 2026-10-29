@@ -22,8 +22,8 @@ import path from 'node:path';
  */
 export const CLASS_ALLOWLIST_RELATIVE = path.join('src', 'common', 'assets', 'styles', 'plugin-classes.txt');
 
-/** 长得像 Tailwind 工具类的 token（含 `sm:` 变体前缀与 `[11px]` 任意值） */
-const CLASS_LIKE = /^(?:[a-z-]+:)*[a-z][a-z0-9/.-]*(?:\[[^\]]+\])?$/;
+/** 长得像 Tailwind 工具类的 token（含 `sm:` / `min-[900px]:` / `@3xl:` 变体前缀与 `[11px]` 任意值） */
+const CLASS_LIKE = /^(?:[a-z@][a-z0-9-]*(?:\[[^\]]+\])?:)*[a-z][a-z0-9/.-]*(?:\[[^\]]+\])?$/;
 
 /**
  * 转义成 CSS 选择器里那样的类名（`text-[10px]` → `text-\[10px\]`）
@@ -44,7 +44,7 @@ const escapeForCss = (className) => className.replace(/[^a-zA-Z0-9_-]/g, (ch) =>
 export const readHostCssClassProbe = (hostRoot) => {
   const dir = path.join(hostRoot, 'dist', 'assets');
   if (!fs.existsSync(dir)) return () => false;
-  const file = fs.readdirSync(dir).find((name) => name.startsWith('index-') && name.endsWith('.css'));
+  const file = fs.readdirSync(dir).find((name) => /^(?:index|main)-.+-[a-z0-9]+\.css$/i.test(name));
   if (!file) return () => false;
   const css = fs.readFileSync(path.join(dir, file), 'utf8');
   return (className) => css.includes(`.${escapeForCss(className)}`);

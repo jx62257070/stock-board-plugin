@@ -29,6 +29,7 @@ import type {
   MarketTurnoverSnapshot,
 } from './market-data.types.ts';
 import type { HEADER_MARQUEE_TONE, PLUGIN_ORIGIN, PLUGIN_STATUS } from '../constants/plugin.constants.ts';
+import type { AgentAskSource } from '../constants/agent-ask.constants.ts';
 
 /** 可逆副作用句柄：调用 `dispose()` 撤销一次注册（幂等） */
 export interface Disposable {
@@ -769,6 +770,20 @@ export interface UiConfirmOptions {
 }
 
 /**
+ * 页签选项（口径同宿主 use-tab-config 的 TabOption；契约快照内联定义）
+ */
+export interface TabOption<T extends string = string> {
+  /** 展示文案 */
+  label: string;
+  /** 选项值（页内唯一） */
+  value: T;
+  /** 分组首项标记（分组模式渲染组名与分隔线） */
+  groupStart?: boolean;
+  /** 分组名（groupStart 为 true 时展示） */
+  groupName?: string;
+}
+
+/**
  * 宿主 UI Kit 服务（`app:ui`）
  *
  * 第三方插件既 import 不了宿主组件，写了 Tailwind 类也可能没有 CSS（构建期只扫描
@@ -812,6 +827,23 @@ export interface UiKitService {
   Icon: Component;
   /** 骨架屏（首屏无数据时的占位；列表刷新不要翻 loading，见 PLUGIN_API.md §10） */
   Skeleton: Component;
+  /**
+   * 页签显隐与排序入口（点击弹出配置弹窗，草稿模式 + 拖拽排序 + 确认落盘）
+   *
+   * props：`pageId`（配置存储分桶）+ `options`（TabOption 全集，声明顺序即默认顺序）。
+   * 与 `useTabConfig` 用同一 pageId 即可读回用户配置。
+   */
+  TabConfigButton: Component;
+  /**
+   * 页面 tabs 配置读取（与 TabConfigButton / 设置页「页签配置」同一持久化 store）
+   *
+   * 必须在组件 setup 内同步调用（内部走 pinia）。`visibleOptions` 按「用户排序 +
+   * 显隐」归一化后的可见项（全部隐藏兜底全显），渲染列表照它遍历即可。
+   */
+  useTabConfig: <T extends string>(
+    pageId: string,
+    defaultOptions: readonly TabOption<T>[],
+  ) => { visibleOptions: Ref<TabOption<T>[]>; activeValue: Ref<T> };
   /** 弹一条应用级确认弹窗（宿主渲染，返回用户是否确认） */
   confirm: (options?: UiConfirmOptions) => Promise<boolean>;
 }
@@ -1188,6 +1220,25 @@ export interface ThemeService {
   trendTheme: Readonly<Ref<TrendTheme>>;
 }
 
+/**
+ * Agent 分析唤起服务（`app:agent-ask`，插件 → Agent 分析窗口）
+ *
+ * 插件发起一条自包含的分析请求，宿主复用既有的窗口创建 / 握手 / 未配模型引导逻辑
+ * 送达 Agent 窗口；Agent 侧会**新开一个会话**直接发送，不复用当前会话上下文。
+ *
+ * 发 prompt 等于替用户向模型发消息（消耗模型额度），请传 `source` 标明来源 ——
+ * Agent 侧会在浮窗里注明「来自插件 xxx」。
+ */
+export interface AgentAskService {
+  /**
+   * 唤起 Agent 分析窗口并发送一条分析请求
+   * @param prompt 完整提示词（自包含：Agent 侧新开会话直接发送，调用方自行拼好全部上下文）
+   * @param source 来源标识（建议传：插件自报 id 与展示名，Agent 侧浮窗注明来源）
+   * @returns 是否成功送达（窗口创建 / 路由跳转失败时为 false）
+   */
+  ask: (prompt: string, source?: AgentAskSource) => Promise<boolean>;
+}
+
 /** 应用初始化之前约定：调整上述服务后同步 PLUGIN_API.md 与 AGENTS.md（见 §12） */
 export interface AppServiceMap {
   /** 应用版本号（内核挂载时自动提供，来源 APP_VERSION） */
@@ -1260,6 +1311,8 @@ export interface AppServiceMap {
   'app:watch-widget-settings': WatchWidgetSettingsService;
   /** 主题实时快照（明暗 / 主题色 / 涨跌配色，供插件向独立窗口同步） */
   'app:theme': ThemeService;
+  /** 唤起 Agent 分析窗口（跨窗口创建 / 握手 / 未配模型引导由宿主代办） */
+  'app:agent-ask': AgentAskService;
 }
 
 /** 内核运行时只读视图（供插件自省，不暴露挂载 / 卸载能力） */
