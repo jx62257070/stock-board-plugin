@@ -56,6 +56,7 @@ const TARGETS = [
   { id: 'csw-active-cap-index', entry: 'plugin.ts' },
   { id: 'dsh-futures-institutional', entry: 'plugin.ts' },
   { id: 'dsh-dapanyuntu', entry: 'plugin.ts' },
+  { id: 'dsh-history-review', entry: 'plugin.ts' },
 ];
 
 /** 运行时桥的全局键（与宿主 `src/constants/plugin.constants.ts` 保持一致） */
