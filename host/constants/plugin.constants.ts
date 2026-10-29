@@ -119,6 +119,36 @@ export const PLUGIN_LAB_EVENT_LIMIT = 12;
 /** 插件工坊事件心跳间隔（毫秒）：事件环形缓冲不是响应式的，用它驱动定时刷新 */
 export const PLUGIN_LAB_TICK_MS = 1000;
 
+/** 插件工坊「插件清单」的视图分组（按钮组取值；默认看已安装） */
+export const PLUGIN_LAB_INVENTORY_TAB = {
+  /** 已安装（工坊清单本体） */
+  INSTALLED: 'installed',
+  /** 未安装（插件市场里本地还没有任何已装版本的条目） */
+  NOT_INSTALLED: 'not-installed',
+  /** 全部（整个插件市场平铺） */
+  ALL: 'all',
+} as const;
+
+/** 插件工坊「插件清单」视图分组的默认值 */
+export const PLUGIN_LAB_INVENTORY_TAB_DEFAULT: (typeof PLUGIN_LAB_INVENTORY_TAB)[keyof typeof PLUGIN_LAB_INVENTORY_TAB] =
+  PLUGIN_LAB_INVENTORY_TAB.INSTALLED;
+
+/** 插件工坊「插件清单」视图分组的展示文案 */
+export const PLUGIN_LAB_INVENTORY_TAB_LABEL: Record<
+  (typeof PLUGIN_LAB_INVENTORY_TAB)[keyof typeof PLUGIN_LAB_INVENTORY_TAB],
+  string
+> = {
+  [PLUGIN_LAB_INVENTORY_TAB.INSTALLED]: '已安装',
+  [PLUGIN_LAB_INVENTORY_TAB.NOT_INSTALLED]: '未安装',
+  [PLUGIN_LAB_INVENTORY_TAB.ALL]: '全部',
+};
+
+/** 插件工坊页头「查看更多」按钮文案（打开右侧抽屉看内核概览等四个详情模块） */
+export const PLUGIN_LAB_MORE_BUTTON_LABEL = '查看更多';
+
+/** 插件工坊详情抽屉标题（内核概览 / 贡献点总览 / 跨插件服务 / 最近事件） */
+export const PLUGIN_LAB_DETAIL_DRAWER_TITLE = '内核与运行详情';
+
 /** 事件名合法形态：`namespace:action` 或纯标识符（宽松，仅用于日志可读性） */
 export const PLUGIN_EVENT_NAME_PATTERN = /^[a-z][a-z0-9:_-]*$/i;
 

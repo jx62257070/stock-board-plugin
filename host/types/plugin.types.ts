@@ -13,6 +13,7 @@
  */
 import type * as Vue from 'vue';
 import type { Component, Ref } from 'vue';
+import type { TabOption } from '../composables/use-tab-config.ts';
 import type { Trend } from '../constants/trend.constants.ts';
 import type { ThemeColor } from '../constants/theme-color.constants.ts';
 import type { TrendTheme } from '../constants/trend-theme.constants.ts';
@@ -770,20 +771,6 @@ export interface UiConfirmOptions {
 }
 
 /**
- * 页签选项（口径同宿主 use-tab-config 的 TabOption；契约快照内联定义）
- */
-export interface TabOption<T extends string = string> {
-  /** 展示文案 */
-  label: string;
-  /** 选项值（页内唯一） */
-  value: T;
-  /** 分组首项标记（分组模式渲染组名与分隔线） */
-  groupStart?: boolean;
-  /** 分组名（groupStart 为 true 时展示） */
-  groupName?: string;
-}
-
-/**
  * 宿主 UI Kit 服务（`app:ui`）
  *
  * 第三方插件既 import 不了宿主组件，写了 Tailwind 类也可能没有 CSS（构建期只扫描
@@ -1247,6 +1234,13 @@ export interface AppServiceMap {
   'kernel:runtime': PluginRuntimeReader;
   /** 宿主路由跳转（插件不直接依赖 router 实例，改走此服务） */
   'app:navigate': (path: string) => void;
+  /**
+   * 系统默认浏览器打开外部链接
+   *
+   * zip 插件 import 不了 `@tauri-apps/plugin-opener`，外链跳转（如「访问原站」）
+   * 统一走此服务：Tauri 内 opener、浏览器环境兜底新标签页。提供方缺席时插件自行降级
+   */
+  'app:open-url': (url: string) => void;
   /**
    * 打开一个插件面板
    *

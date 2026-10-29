@@ -1,0 +1,9 @@
+{
+  "id": "dsh-dapanyuntu",
+  "name": "大盘云图",
+  "version": "1.0.0",
+  "description": "注册「大盘云图」整页（市场总览页头按钮进入，路径 /heatmap）：第三方站点 dapanyuntu.com 的 A 股板块 / 个股树图直嵌展示，数据与交互均由原站提供；桌面端明暗主题自动跟随（依赖宿主注入脚本），并提供「访问原站」入口。无本地数据，卸载即干净移除。",
+  "author": "内置",
+  "entry": "main.js",
+  "readme": "README.md"
+}

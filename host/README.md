@@ -7,4 +7,4 @@
 插件源码只引用这里的东西：`../../host/types/plugin.types`、`../../host/constants/plugin.constants` …
 宿主改了契约 → 跑一次 `pnpm sync:host` → 类型层立刻暴露不兼容点。
 
-当前快照文件数：17
+当前快照文件数：21
