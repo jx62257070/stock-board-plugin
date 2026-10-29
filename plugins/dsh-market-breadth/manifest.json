@@ -1,0 +1,9 @@
+{
+  "id": "dsh-market-breadth",
+  "name": "市场宽度",
+  "version": "1.1.0",
+  "description": "左侧导航新增「市场宽度」页面（自宿主内置页迁移，路径沿用 /market-breadth）：当日概览（涨跌家数 / ARMS / 活跃占比）+ 六大市场广度指标副图（ADL / ADR / OBOS / ARMS / MCO / 活跃占比），基于本地逐日积累的日 bar 离线计算；附「总结」（可选已采集日期）与「刷新」，并为 Agent 贡献宽度快照与历史序列两个只读工具。",
+  "author": "内置",
+  "entry": "main.js",
+  "readme": "README.md"
+}

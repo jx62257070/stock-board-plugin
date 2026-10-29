@@ -214,7 +214,8 @@ export const USER_PLUGIN_PACKAGE_ACCEPT = '.zip,application/zip,application/x-zi
  * 用户插件的安装来源（只做展示与统计，不参与启停判定）
  *
  * `zip` = 第三方打包产物；`code` = 粘贴 / 选择单文件 JS；
- * `update` = 在线更新（远程 zip 直链下载后走同一条安装链路）。
+ * `update` = 在线更新（远程 zip 直链下载后走同一条安装链路）；
+ * `market` = 插件市场在线安装（官方源或第三方源，走同一条安装链路）。
  */
 export const USER_PLUGIN_SOURCE = {
   /** 导入 zip 产物包 */
@@ -223,6 +224,8 @@ export const USER_PLUGIN_SOURCE = {
   CODE: 'code',
   /** 在线更新（来自官方插件仓库的更新清单） */
   UPDATE: 'update',
+  /** 插件市场在线安装（多源 GitHub Releases） */
+  MARKET: 'market',
 } as const;
 
 /** 安装来源 → 中文文案（插件工坊列表项展示） */
@@ -233,6 +236,7 @@ export const USER_PLUGIN_SOURCE_LABEL: Record<
   [USER_PLUGIN_SOURCE.PACKAGE]: 'zip 包安装',
   [USER_PLUGIN_SOURCE.CODE]: '粘贴代码安装',
   [USER_PLUGIN_SOURCE.UPDATE]: '在线更新安装',
+  [USER_PLUGIN_SOURCE.MARKET]: '插件市场安装',
 };
 
 /** 用户插件代码动态 import 时的 Blob MIME（ESM 模块） */
@@ -414,6 +418,9 @@ export const USER_PLUGIN_INTAKE_REMOVE_LABEL = '移除';
 
 /** 单包「安装」按钮文案 */
 export const USER_PLUGIN_INTAKE_INSTALL_LABEL = '安装';
+
+/** 工坊页「安装自定义插件」入口按钮文案（也是安装弹窗标题；本地 zip / 粘贴代码通道） */
+export const USER_PLUGIN_INSTALL_CUSTOM_LABEL = '安装自定义插件';
 
 /**
  * 底部「安装全部」按钮文案（括号内为可安装数量）
