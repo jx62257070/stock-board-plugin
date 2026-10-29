@@ -24,6 +24,7 @@ import {
   MARGIN_REFRESH_RECENT_DAYS,
   SHARE_HISTORY_MAX_DAYS,
   SHARE_HISTORY_START,
+  TENCENT_KLINE_COUNT_MAX,
   TRACKED_ETFS,
 } from './constants';
 import {
@@ -156,7 +157,10 @@ const fetchPriceMap = async (
     TRACKED_ETFS.map((etf) => async () => {
       const symbol = `${etf.market === '1' ? 'sh' : 'sz'}${etf.code}`;
       try {
-        return await fetchTencentKline(deps, symbol, start, end, SHARE_HISTORY_MAX_DAYS);
+        // 条数取「日历日兜底」与「腾讯单次上限」的较小者：
+        // 腾讯 ≥ 2200 直接回空（见 TENCENT_KLINE_COUNT_MAX 注释）
+        const count = Math.min(SHARE_HISTORY_MAX_DAYS, TENCENT_KLINE_COUNT_MAX);
+        return await fetchTencentKline(deps, symbol, start, end, count);
       } catch {
         return [] as TencentKlineRow[];
       }
