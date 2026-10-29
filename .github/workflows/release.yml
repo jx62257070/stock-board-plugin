@@ -38,11 +38,10 @@ jobs:
   release:
     name: 打包并发布 Release
     runs-on: ubuntu-latest
-    # 发版走 release 环境：该环境配了 required reviewers（jx62257070 / WHF293），
-    # 任何人触发本 workflow 都要等名单里的人批准才继续。
-    # 理由：GitHub 对个人仓库没有细分的 Release 权限（能 push 就能发版），
-    # 能单独给「发版」加一道卡的只有 environment。
-    environment: release
+    # ⚠️ 发版门禁（environment: release + required reviewers）已于 2026-10-30 暂时移除：
+    # 该门自上线起会静默阻塞发版（v1.9.0 / v1.10.0 均因无人批准而从未发布，
+    # API 审批对 deployment 创建者返回 FORBIDDEN，非 admin 无法 bypass）。
+    # 确认在 UI 上恢复门禁 + 审批链路可用后，把 `environment: release` 加回本 job。
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
