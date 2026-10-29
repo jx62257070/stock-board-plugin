@@ -1,7 +1,7 @@
 {
   "id": "dsh-futures-institutional",
   "name": "期货·机构行为",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "左侧导航新增「机构行为」看板：中金所 CCPM 成交持仓排名（代客口径、达标/前20会员）的多空席位行为观测——概览指标、席位总表（做多/做空/对冲标注）、多空柱状、净持仓时序、移仓换月；历史数据落本地插件库（「同步历史」一次性回填），重进页面不联网；附 AI 分析入口与 get_ccpm_summary / get_ccpm_history 两只 Agent 只读工具。",
   "author": "内置",
   "entry": "main.js",

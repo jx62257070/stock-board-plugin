@@ -23,6 +23,7 @@ import type { TableColumn } from '../../host/types/table.types';
 import type {
   CcpmAggregateRow,
   CcpmAnalysisDataset,
+  CcpmMemberRow,
   CcpmMemberSeries,
   CcpmMemberStats,
   CcpmProductDayData,
@@ -134,11 +135,6 @@ const activeDataList = computed<CcpmProductDayData[]>(() => {
   }
   return dayData.value ? [dayData.value] : [];
 });
-
-/** 口径合约总数（完整性的分母） */
-const totalCount = computed(() =>
-  activeDataList.value.reduce((sum, item) => sum + item.instruments.length, 0),
-);
 
 /** 当前品种披露的合约列表 */
 const instruments = computed<string[]>(() =>
@@ -410,15 +406,110 @@ const othersAggregate = computed<CcpmAggregateRow | null>(() => {
   return aggregateCcpmOthers(activeDataList.value, selectedMember.value);
 });
 
-/** 选中席位在当前口径下的全部上榜原始行（分解表数据源） */
-const selectedBreakdownRows = computed(() => {
-  if (!selectedMember.value) {
-    return [];
+/** 席位画像统一视图模型（单合约 / 聚合两口径归一化，画像卡单一消费） */
+interface ProfileView {
+  /** 多单（手） */
+  buy: number;
+  /** 多单增减 */
+  buyChg: number | null;
+  /** 空单（手） */
+  sell: number;
+  /** 空单增减 */
+  sellChg: number | null;
+  /** 净持仓 */
+  net: number;
+  /** 净增减 */
+  netChg: number | null;
+  /** 单合约口径：多单占该合约上榜总多单比例（%）；聚合口径为 null */
+  buyRatio: number | null;
+  /** 单合约口径：空单占比（%）；聚合口径为 null */
+  sellRatio: number | null;
+  /** 聚合口径：上榜合约数；单合约口径为 null */
+  coveredCount: number | null;
+  /** 聚合口径：口径合约总数；单合约口径为 null */
+  totalCount: number | null;
+  /** 行为标签 */
+  tag: DisplayRow['tag'];
+  /** 标签判定依据 */
+  tagReason: string | null;
+}
+
+/** 选中席位画像（当前口径归一化；未选中 / 无数据为 null） */
+const profile = computed<ProfileView | null>(() => {
+  if (scope.value !== 'contract' && selectedAggregate.value) {
+    const row = selectedAggregate.value;
+    return {
+      buy: row.totalBuy,
+      buyChg: row.totalBuyChg,
+      sell: row.totalSell,
+      sellChg: row.totalSellChg,
+      net: row.totalNet,
+      netChg: row.totalNetChg,
+      buyRatio: null,
+      sellRatio: null,
+      coveredCount: row.coveredCount,
+      totalCount: row.totalCount,
+      tag: row.tag,
+      tagReason: row.tagReason,
+    };
   }
-  return activeDataList.value
-    .flatMap((item) => item.rows)
-    .filter((row) => row.memberName === selectedMember.value);
+  const row = selectedStats.value;
+  if (scope.value === 'contract' && row) {
+    return {
+      buy: row.buyPos ?? 0,
+      buyChg: row.buyChg,
+      sell: row.sellPos ?? 0,
+      sellChg: row.sellChg,
+      net: row.netPos ?? 0,
+      netChg: row.netChg,
+      buyRatio: row.buyRatio,
+      sellRatio: row.sellRatio,
+      coveredCount: null,
+      totalCount: null,
+      tag: row.tag,
+      tagReason: row.tagReason,
+    };
+  }
+  return null;
 });
+
+/** 其余上榜会员汇总（两口径归一化；未选中时为 null） */
+const others = computed<{ net: number; tagReason: string | null } | null>(() => {
+  if (scope.value !== 'contract' && othersAggregate.value) {
+    return { net: othersAggregate.value.totalNet, tagReason: othersAggregate.value.tagReason };
+  }
+  if (scope.value === 'contract' && othersStats.value) {
+    return { net: othersStats.value.netPos ?? 0, tagReason: othersStats.value.tagReason };
+  }
+  return null;
+});
+
+/** 其余上榜会员家数（画像卡汇总行文案用） */
+const othersCount = computed(() =>
+  scope.value === 'contract' ? Math.max(stats.value.length - 1, 0) : Math.max(aggregates.value.length - 1, 0),
+);
+
+/** 席位 → 跨合约分解原始行（总表任意行展开都用它，不挂在选中席位上） */
+const breakdownByMember = computed<Map<string, CcpmMemberRow[]>>(() => {
+  const map = new Map<string, CcpmMemberRow[]>();
+  for (const row of activeDataList.value.flatMap((item) => item.rows)) {
+    const list = map.get(row.memberName);
+    if (list) {
+      list.push(row);
+    } else {
+      map.set(row.memberName, [row]);
+    }
+  }
+  return map;
+});
+
+/**
+ * 席位 → 分解行（模板收口用）
+ * @param memberName 席位名
+ * @returns 该席位在当前口径下的全部上榜原始行
+ */
+const breakdownOf = (memberName: string): CcpmMemberRow[] =>
+  breakdownByMember.value.get(memberName) ?? [];
 
 /**
  * 汇总各品种合约合计（指标卡数据源）
@@ -508,6 +599,21 @@ const signClass = (value: number): string => (value > 0 ? 'text-up' : value < 0 
  */
 const signed = (value: number | null): string =>
   value === null ? '--' : `${value > 0 ? '+' : ''}${value.toLocaleString('en-US')}`;
+
+/**
+ * 净增减胶囊类（弱色底 + 语义文字色，口径同宿主 Tag 胶囊）
+ * @param value 数值
+ * @returns 类名
+ */
+const chgPillClass = (value: number): string =>
+  value > 0 ? 'bg-up-weak text-up' : value < 0 ? 'bg-down-weak text-down' : 'bg-flat-weak text-text-secondary';
+
+/**
+ * 百分比文案（保留一位小数，null 显 --）
+ * @param value 百分数数值
+ * @returns 文案
+ */
+const pct = (value: number | null): string => (value === null ? '--' : `${value.toFixed(1)}%`);
 
 /** 衍生榜单条目 */
 interface RankItem {
@@ -908,10 +1014,6 @@ const runAiAnalysis = async (): Promise<void> => {
         </div>
       </div>
 
-      <div v-if="selectedPartial" class="rounded-card bg-up-weak px-4 py-2 text-xs text-up-strong">
-        {{ FUTURES_PAGE_TEXT.partialWarn }}
-      </div>
-
       <!-- 上榜会员总表（app:ui Table：列配置驱动 + expandable + 作用域插槽）；与画像 6:4 并排 -->
       <div class="grid grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <component
@@ -934,6 +1036,12 @@ const runAiAnalysis = async (): Promise<void> => {
             @row-click="onSelectMember($event.memberName)"
             @toggle-expand="onToggleExpand($event.memberName)"
           >
+            <template #memberName="{ row }">
+              <!-- 宿主 Table 无选中态：席位名高亮即「当前画像行」的行内锚点 -->
+              <span :class="row.memberName === selectedMember ? 'text-primary font-semibold' : ''">
+                {{ row.memberName }}
+              </span>
+            </template>
             <template #buy="{ row }">
               <span class="text-up">{{ row.buy?.toLocaleString('en-US') }}</span>
             </template>
@@ -961,19 +1069,22 @@ const runAiAnalysis = async (): Promise<void> => {
             </template>
             <template #expanded="{ row }">
               <div class="text-xs text-text-tertiary">
-                {{ row.memberName }} · 跨合约分解（共 {{ totalCount }} 个合约口径）
+                {{ row.memberName }} · 跨合约分解（该席位上榜 {{ breakdownOf(row.memberName).length }} 个合约）
               </div>
               <div class="mt-1 flex flex-wrap gap-2">
                 <span
-                  v-for="item in selectedBreakdownRows.filter((r) => r.memberName === row.memberName)"
+                  v-for="item in breakdownOf(row.memberName)"
                   :key="item.instrumentId"
-                  class="rounded-card bg-surface px-2 py-1"
+                  class="rounded-card bg-surface px-2 py-1 tabular-nums"
                 >
-                  {{ item.instrumentId }}：多 {{ (item.buyPos ?? 0).toLocaleString('en-US') }}（{{ signed(item.buyChg) }}）/
-                  空 {{ (item.sellPos ?? 0).toLocaleString('en-US') }}（{{ signed(item.sellChg) }}）
+                  {{ item.instrumentId }}
+                  多 <span class="text-up">{{ (item.buyPos ?? 0).toLocaleString('en-US') }}</span>
+                  （<span :class="signClass(item.buyChg ?? 0)">{{ signed(item.buyChg) }}</span>）/
+                  空 <span class="text-down">{{ (item.sellPos ?? 0).toLocaleString('en-US') }}</span>
+                  （<span :class="signClass(item.sellChg ?? 0)">{{ signed(item.sellChg) }}</span>）
                 </span>
                 <span
-                  v-if="selectedBreakdownRows.filter((r) => r.memberName === row.memberName).length === 0"
+                  v-if="breakdownOf(row.memberName).length === 0"
                   class="text-text-tertiary"
                 >无披露明细</span>
               </div>
@@ -981,29 +1092,133 @@ const runAiAnalysis = async (): Promise<void> => {
           </component>
         </component>
 
-        <!-- 席位画像（与总表并排，栅格对齐原宿主页） -->
+        <!-- 席位画像（与总表并排）：净持仓 hero + 多空双格 + 结构条 + 行为判定 + 其余汇总 -->
         <component
           :is="runtime.deps.ui.Card"
           :title="`席位画像${selectedMember ? ` · ${selectedMember}` : ''}`"
         >
-          <div v-if="scope !== 'contract' && selectedAggregate" class="space-y-1 text-xs">
-            <div>多单 <span class="text-up">{{ selectedAggregate.totalBuy.toLocaleString('en-US') }}</span> / 空单 <span class="text-down">{{ selectedAggregate.totalSell.toLocaleString('en-US') }}</span> / 净 <span :class="signClass(selectedAggregate.totalNet)">{{ selectedAggregate.totalNet.toLocaleString('en-US') }}</span>（手）</div>
-            <div>净增减 <span :class="signClass(selectedAggregate.totalNetChg)">{{ signed(selectedAggregate.totalNetChg) }}</span>，覆盖 {{ selectedAggregate.coveredCount }}/{{ selectedAggregate.totalCount }} 合约</div>
-            <div class="text-text-secondary">{{ selectedAggregate.tagReason }}</div>
+          <template v-if="profile">
+            <!-- 净持仓 hero：大号数字锚点 + 净增减胶囊 -->
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-xs text-text-tertiary">净持仓（手）</div>
+                <div
+                  class="mt-1 text-lg leading-none font-bold tabular-nums"
+                  :class="signClass(profile.net)"
+                >
+                  {{ signed(profile.net) }}
+                </div>
+              </div>
+              <div
+                v-if="profile.netChg !== null"
+                class="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium tabular-nums"
+                :class="chgPillClass(profile.netChg)"
+              >
+                净增减 {{ signed(profile.netChg) }}
+              </div>
+            </div>
+
+            <!-- 多 / 空双格：弱色底区分两侧，增减为次级行 -->
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <div class="rounded-lg bg-up-weak px-2.5 py-2">
+                <div class="text-xs text-text-tertiary">多单（手）</div>
+                <div class="mt-1 text-base leading-none font-semibold text-up tabular-nums">
+                  {{ profile.buy.toLocaleString('en-US') }}
+                </div>
+                <div class="mt-1.5 text-xs leading-none text-up tabular-nums">
+                  增减 {{ signed(profile.buyChg) }}
+                </div>
+              </div>
+              <div class="rounded-lg bg-down-weak px-2.5 py-2">
+                <div class="text-xs text-text-tertiary">空单（手）</div>
+                <div class="mt-1 text-base leading-none font-semibold text-down tabular-nums">
+                  {{ profile.sell.toLocaleString('en-US') }}
+                </div>
+                <div class="mt-1.5 text-xs leading-none text-down tabular-nums">
+                  增减 {{ signed(profile.sellChg) }}
+                </div>
+              </div>
+            </div>
+
+            <!-- 结构条：聚合口径 → 上榜合约覆盖；单合约口径 → 多空占比 -->
+            <div v-if="profile.coveredCount !== null" class="mt-3">
+              <div class="flex items-baseline justify-between text-xs">
+                <span class="text-text-secondary">上榜合约覆盖</span>
+                <span class="text-text tabular-nums">{{ profile.coveredCount }} / {{ profile.totalCount }}</span>
+              </div>
+              <div class="mt-1 h-1 rounded-full bg-flat">
+                <div
+                  class="h-1 rounded-full bg-primary"
+                  :style="{
+                    width: `${Math.min((profile.coveredCount / Math.max(profile.totalCount ?? 1, 1)) * 100, 100)}%`,
+                  }"
+                />
+              </div>
+              <div v-if="selectedPartial" class="mt-1.5 text-xs leading-relaxed text-up-strong">
+                ⚠ {{ FUTURES_PAGE_TEXT.partialWarn }}
+              </div>
+            </div>
+            <div v-else class="mt-3 space-y-2">
+              <div>
+                <div class="flex items-baseline justify-between text-xs">
+                  <span class="text-text-secondary">多单占比（占该合约上榜多单）</span>
+                  <span class="text-text tabular-nums">{{ pct(profile.buyRatio) }}</span>
+                </div>
+                <div class="mt-1 h-1 rounded-full bg-flat">
+                  <div
+                    class="h-1 rounded-full bg-up"
+                    :style="{ width: `${Math.min(profile.buyRatio ?? 0, 100)}%` }"
+                  />
+                </div>
+              </div>
+              <div>
+                <div class="flex items-baseline justify-between text-xs">
+                  <span class="text-text-secondary">空单占比（占该合约上榜空单）</span>
+                  <span class="text-text tabular-nums">{{ pct(profile.sellRatio) }}</span>
+                </div>
+                <div class="mt-1 h-1 rounded-full bg-flat">
+                  <div
+                    class="h-1 rounded-full bg-down"
+                    :style="{ width: `${Math.min(profile.sellRatio ?? 0, 100)}%` }"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 行为判定：标签 + 依据（弱底块收拢，与表格行为标注同一套文案） -->
+            <div class="mt-3 rounded-lg bg-flat-weak px-2.5 py-2">
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-text-secondary">行为判定</span>
+                <component
+                  :is="runtime.deps.ui.Tag"
+                  v-if="profile.tag"
+                  :tone="tagTone(profile.tag)"
+                >
+                  {{ FUTURES_PAGE_TEXT.tagLabels[profile.tag] }}
+                </component>
+                <span v-else class="text-xs text-text-tertiary">--</span>
+              </div>
+              <div v-if="profile.tagReason" class="mt-1 text-xs leading-relaxed text-text-secondary">
+                {{ profile.tagReason }}
+              </div>
+            </div>
+
+            <!-- 其余上榜会员对照 -->
+            <div v-if="others" class="mt-2 flex items-baseline justify-between gap-2 text-xs">
+              <span class="min-w-0 truncate text-text-tertiary">其余 {{ othersCount }} 家上榜汇总</span>
+              <span
+                class="shrink-0 font-medium tabular-nums"
+                :class="signClass(others.net)"
+              >
+                净 {{ others.net.toLocaleString('en-US') }}
+              </span>
+            </div>
+
+            <div class="mt-2 text-xs leading-relaxed text-text-tertiary">{{ FUTURES_PAGE_TEXT.tagRule }}</div>
+          </template>
+          <div v-else class="py-8 text-center text-xs text-text-tertiary">
+            点击左侧总表席位行，查看该席位的多空画像与行为判定
           </div>
-          <div v-else-if="selectedStats" class="space-y-1 text-xs">
-            <div>多单 <span class="text-up">{{ (selectedStats.buyPos ?? 0).toLocaleString('en-US') }}</span> / 空单 <span class="text-down">{{ (selectedStats.sellPos ?? 0).toLocaleString('en-US') }}</span> / 净 <span :class="signClass(selectedStats.netPos ?? 0)">{{ (selectedStats.netPos ?? 0).toLocaleString('en-US') }}</span>（手）</div>
-            <div>多占比 {{ selectedStats.buyRatio === null ? '--' : `${selectedStats.buyRatio.toFixed(1)}%` }}，空占比 {{ selectedStats.sellRatio === null ? '--' : `${selectedStats.sellRatio.toFixed(1)}%` }}</div>
-            <div class="text-text-secondary">{{ selectedStats.tagReason }}</div>
-          </div>
-          <div v-else class="text-xs text-text-tertiary">点击总表行查看席位画像</div>
-          <div v-if="scope !== 'contract' && othersAggregate" class="mt-3 border-t border-border pt-2 text-xs text-text-secondary">
-            其余 {{ (aggregates.length - 1) }} 家汇总：净 <span :class="signClass(othersAggregate.totalNet)">{{ othersAggregate.totalNet.toLocaleString('en-US') }}</span>（{{ othersAggregate.tagReason }}）
-          </div>
-          <div v-else-if="scope === 'contract' && othersStats" class="mt-3 border-t border-border pt-2 text-xs text-text-secondary">
-            其他机构汇总：净 <span :class="signClass(othersStats.netPos ?? 0)">{{ (othersStats.netPos ?? 0).toLocaleString('en-US') }}</span>（{{ othersStats.tagReason }}）
-          </div>
-          <div class="mt-2 text-xs text-text-tertiary">{{ FUTURES_PAGE_TEXT.tagRule }}</div>
         </component>
       </div>
 

@@ -30,7 +30,7 @@ import type { PluginDefinition } from '../../host/types/plugin.types';
 export const futuresInstitutionalPlugin: PluginDefinition = {
   id: FUTURES_INSTITUTIONAL_PLUGIN_ID,
   name: '期货·机构行为',
-  version: '1.1.0',
+  version: '1.1.1',
   description:
     '左侧导航新增「机构行为」看板：中金所 CCPM 成交持仓排名（代客口径、达标/前20会员）的多空席位行为观测 —— '
     + '概览指标、席位总表（做多/做空/对冲标注）、多空柱状、净持仓时序、移仓换月；'

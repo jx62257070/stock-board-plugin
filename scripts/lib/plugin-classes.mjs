@@ -70,6 +70,9 @@ const keepToken = (token, isKnownClass) =>
  * @returns 类名集合
  */
 export const collectArtifactClasses = (code, isKnownClass = () => false) => {
+  // v-if 编译占位注释（createCommentVNode("v-if", true)）常与 :class 绑定同行，
+  // 不先剔除会被下面「取到行尾再抽字符串」的分支误收为类名
+  const source = code.replaceAll(/createCommentVNode\("v-if"[^)]*\)/g, '');
   const classes = new Set();
   /**
    * 把一段文本按空白 / 引号切碎后收类名
@@ -81,9 +84,9 @@ export const collectArtifactClasses = (code, isKnownClass = () => false) => {
     }
   };
   // 1. class: "a b c" 直接字符串（含 _hoisted_* 常量）
-  for (const match of code.matchAll(/\bclass\s*:\s*(['"`])([\s\S]*?)\1/g)) absorb(match[2]);
+  for (const match of source.matchAll(/\bclass\s*:\s*(['"`])([\s\S]*?)\1/g)) absorb(match[2]);
   // 2. :class 的数组 / 对象 / 三元表达式：取到行尾再抽里面的字符串
-  for (const match of code.matchAll(/\bclass\s*:\s*([^\n]*)/g)) {
+  for (const match of source.matchAll(/\bclass\s*:\s*([^\n]*)/g)) {
     for (const inner of match[1].matchAll(/(['"`])([\s\S]*?)\1/g)) absorb(inner[2]);
   }
   return classes;
