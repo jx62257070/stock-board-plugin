@@ -167,12 +167,12 @@ const activeTimelineIndex = computed(() => {
   const date = activeTimelineDate.value;
   return date === '' ? -1 : timelineDateIndex.value.get(date) ?? -1;
 });
-/** 十字焦点线的 x 坐标（内容像素坐标） */
-const crosshairLeft = computed(() =>
-  activeTimelineIndex.value < 0
-    ? 0
-    : activeTimelineIndex.value * timelineDayWidth.value + timelineDayWidth.value / 2,
-);
+/** 十字焦点线的 x 坐标（内容像素坐标；最新在左，数据下标需翻转成视觉位置） */
+const crosshairLeft = computed(() => {
+  if (activeTimelineIndex.value < 0) return 0;
+  const n = comboSeries.value.length;
+  return (n - 1 - activeTimelineIndex.value) * timelineDayWidth.value + timelineDayWidth.value / 2;
+});
 /** 读数行日期：钉住 / 悬停优先，否则最新交易日（常驻读数行始终有内容） */
 const readoutDate = computed(() => {
   const active = activeTimelineDate.value;
@@ -482,6 +482,7 @@ const nationalPath = computed(() => {
   const max = Math.max(...values);
   const span = max - min || 1;
   const height = 100;
+  const n = list.length;
   const segments: string[] = [];
   let open = false;
   for (const point of national) {
@@ -491,7 +492,7 @@ const nationalPath = computed(() => {
       continue;
     }
     const w = timelineDayWidth.value;
-    const x = index * w + w / 2;
+    const x = (n - 1 - index) * w + w / 2;
     const y = height - ((point.nationalSharesYi - min) / span) * height;
     segments.push(`${open ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`);
     open = true;
@@ -580,18 +581,22 @@ const bandRowHeight = computed(() => Math.min(32, Math.max(12, Math.round(flowRo
 /** 逐日份额信号（全历史；与净申赎柱同刻度铺开） */
 const shareTimelineFull = computed<ShareSignalDay[]>(() => shareTimeline.value);
 
-/** 全历史每日净申赎柱（高度开方压缩：按全历史最大值归一后取平方根，小流量日也可见） */
+/** 信号色带渲染序（**最新在左**倒序；数据本身仍按升序，仅视觉翻转） */
+const shareTimelineReversed = computed<ShareSignalDay[]>(() => [...shareTimelineFull.value].reverse());
+
+/** 全历史每日净申赎柱（高度开方压缩：按全历史最大值归一后取平方根，小流量日也可见）。
+ * 渲染数组按**最新在左**倒序（key 是日期，不影响逐柱取值与着色）。 */
 const flowBars = computed(() => {
   const list = comboSeries.value;
   const max = Math.max(...list.map((point) => Math.abs(point.netFlowYi ?? 0)), 1);
-  return list.map((point) => ({
+  return [...list].reverse().map((point) => ({
     date: point.date,
     value: point.netFlowYi,
     height: Math.sqrt(Math.abs(point.netFlowYi ?? 0) / max) * 100,
   }));
 });
 
-/** 份额折线路径（x = 逐日固定像素，与柱、色带同一时间刻度） */
+/** 份额折线路径（x = 逐日固定像素，与柱、色带同一时间刻度；**最新在左**，见 flipX） */
 const sharePath = computed(() => {
   const list = comboSeries.value;
   if (list.length < 2) return '';
@@ -600,10 +605,11 @@ const sharePath = computed(() => {
   const max = Math.max(...values);
   const span = max - min || 1;
   const height = 100;
+  const n = list.length;
   return list
     .map((point, index) => {
       const w = timelineDayWidth.value;
-      const x = index * w + w / 2;
+      const x = (n - 1 - index) * w + w / 2;
       const y = height - ((point.totalSharesYi - min) / span) * height;
       return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
     })
@@ -613,9 +619,10 @@ const sharePath = computed(() => {
 /** 时间轴内容总宽（px） */
 const timelineWidth = computed(() => comboSeries.value.length * timelineDayWidth.value);
 
-/** 季度刻度（每季首月的位置，像素定位与内容同宽） */
+/** 季度刻度（每季首月的位置，像素定位与内容同宽；**最新在左**，按翻转后的位置升序排列） */
 const timelineQuarterMarks = computed(() => {
   const list = comboSeries.value;
+  const n = list.length;
   const marks: { label: string; left: number }[] = [];
   let prevMonth = '';
   list.forEach((point, index) => {
@@ -624,9 +631,9 @@ const timelineQuarterMarks = computed(() => {
     prevMonth = ym;
     const month = Number(point.date.slice(5, 7));
     if (month !== 1 && month !== 4 && month !== 7 && month !== 10) return;
-    marks.push({ label: ym, left: index * timelineDayWidth.value });
+    marks.push({ label: ym, left: (n - 1 - index) * timelineDayWidth.value });
   });
-  return marks;
+  return marks.sort((a, b) => a.left - b.left);
 });
 
 /** 时间轴视口引用（拖动滚动容器） */
@@ -660,11 +667,13 @@ const onTimelinePointerDown = (event: PointerEvent) => {
 const onTimelinePointerMove = (event: PointerEvent) => {
   const el = timelineViewport.value;
   if (!el) return;
-  // 悬停跟踪：光标下的交易日驱动十字焦点线与共享读数（拖动中也跟随）
+  // 悬停跟踪：光标下的交易日驱动十字焦点线与共享读数（拖动中也跟随）。
+  // 内容像素 → 视觉序号（最新在左）→ 翻转回数据序号（comboSeries 升序）。
   const rect = el.getBoundingClientRect();
-  const index = Math.floor((event.clientX - rect.left + el.scrollLeft) / timelineDayWidth.value);
+  const visual = Math.floor((event.clientX - rect.left + el.scrollLeft) / timelineDayWidth.value);
   const list = comboSeries.value;
-  hoverTimelineDate.value = index >= 0 && index < list.length ? list[index].date : '';
+  const index = list.length - 1 - visual;
+  hoverTimelineDate.value = visual >= 0 && visual < list.length ? list[index].date : '';
   if (!timelineDragStart) return;
   const dx = event.clientX - timelineDragStart.x;
   if (Math.abs(dx) > 4) timelineDidDrag.value = true;
@@ -725,20 +734,20 @@ const onTimelineWheel = (event: WheelEvent) => {
   });
 };
 
-/** 把视口滚到最右端（最新交易日） */
-const alignTimelineRight = () => {
+/** 把视口对齐到最新交易日（在左端，scrollLeft = 0；缩放/重渲染后兜底归位用） */
+const alignTimelineToLatest = () => {
   const el = timelineViewport.value;
-  if (el) el.scrollLeft = el.scrollWidth;
+  if (el) el.scrollLeft = 0;
 };
 
-// 数据首次就绪（或从空变非空）后，把视口对齐到最右端（最新交易日）。
-// 必须等 DOM 真正渲染完（flush: 'post' + 双 rAF），否则 scrollWidth 还是 0，滚不动。
+// 数据首次就绪（或从空变非空）后，把视口对齐到左端（最新交易日）。
+// 必须等 DOM 真正渲染完（flush: 'post' + 双 rAF），否则 scrollWidth 还是 0。
 watch(
   () => comboSeries.value.length,
   (length) => {
     if (length === 0 || timelineAligned.value) return;
     timelineAligned.value = true;
-    requestAnimationFrame(() => requestAnimationFrame(alignTimelineRight));
+    requestAnimationFrame(() => requestAnimationFrame(alignTimelineToLatest));
   },
   { flush: 'post' },
 );
@@ -1101,7 +1110,7 @@ const shortDate = (date: string): string => date.slice(5);
           </div>
         </div>
 
-        <!-- 份额走势 + 每日净申赎 + 信号色带：全历史同刻度铺开，左右拖动查看 -->
+        <!-- 份额走势 + 每日净申赎 + 信号色带：全历史同刻度铺开（最新在左），左右拖动查看 -->
         <div class="mt-4">
           <p class="relative mb-1 flex items-center gap-1 text-xs font-medium text-text-secondary">
             {{ BROAD_SHARE_CHART_TITLE }}
@@ -1113,7 +1122,7 @@ const shortDate = (date: string): string => date.slice(5);
             >
               <component :is="deps.ui.Icon" name="help" :size="12" />
             </button>
-            <span class="text-[10px] font-normal text-text-tertiary">（左右拖动查看更早 · 悬停出十字线与读数 · 点击钉住）</span>
+            <span class="text-[10px] font-normal text-text-tertiary">（最新在左 · 更早在右，左右拖动查看 · 悬停出十字线与读数 · 点击钉住）</span>
             <!-- 颜色深浅图例浮层（就地解释，点外部关闭） -->
             <template v-if="timelineHelpOpen">
               <span
@@ -1263,11 +1272,11 @@ const shortDate = (date: string): string => date.slice(5);
                     </div>
                   </div>
                 </div>
-                <!-- 行3：逐日生命周期色带（同一时间刻度） -->
+                <!-- 行3：逐日生命周期色带（同一时间刻度；最新在左倒序渲染） -->
                 <p class="sticky left-0 mt-2 text-xs font-medium text-text-secondary">信号状态</p>
                 <div class="mt-1 flex" style="gap: 1px">
                   <div
-                    v-for="day in shareTimelineFull"
+                    v-for="day in shareTimelineReversed"
                     :key="day.date"
                     class="group relative"
                     :class="lifecycleBarClass(day.lifecycle)"
