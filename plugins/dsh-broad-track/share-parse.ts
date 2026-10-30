@@ -17,6 +17,7 @@
  * ⚠️ **份额是「份数」不是「金额」**：净申赎金额需要用当日收盘价折算
  * （Δ份额 × 收盘价），价格缺失时只保留份额变动、金额留 `null`。
  */
+import { EM_RZRQ_FIELD } from './constants';
 
 /** 上交所单日份额行（解析后） */
 export interface SseShareRow {
@@ -228,6 +229,64 @@ export const groupSharesByDate = (
     bucket.set(row.code, row.sharesYi);
   }
   return grouped;
+};
+
+/** 元 → 亿的换算系数 */
+const YUAN_TO_YI = 1 / 1e8;
+
+/** 东财两融明细行（解析后） */
+export interface MarginRow {
+  /** 6 位裸代码 */
+  code: string;
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 融资余额（亿元；缺失为 null） */
+  balanceYi: number | null;
+  /** 当日融资净买入（亿元；缺失为 null） */
+  netBuyYi: number | null;
+}
+
+/**
+ * 解析东财数据中心两融明细响应（纯函数）
+ *
+ * 响应形态：`{ version, result: { pages, data: [...] } }`；无数据时 `result` 为
+ * `null`（请求成功但该代码无记录，返回空数组 —— 不算失败）。脏行（日期不可
+ * 识别）整行丢弃；余额 / 净买入缺失留 `null`（不当 0 用，见数值口径纪律）。
+ * @param text 响应文本
+ * @param code 请求时的 6 位裸代码（行内 SCODE 只作一致性校验）
+ * @returns 两融行（按上游顺序，上游本就是日期降序）
+ */
+export const parseMarginHistory = (text: string, code: string): MarginRow[] => {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error('两融明细响应不是合法 JSON');
+  }
+  const root = payload as { result?: { data?: unknown } | null };
+  const data = root.result?.data;
+  if (!Array.isArray(data)) return [];
+  const rows: MarginRow[] = [];
+  for (const item of data) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    const rawDate = row[EM_RZRQ_FIELD.DATE];
+    const date = normalizeDate(
+      typeof rawDate === 'string' ? rawDate.slice(0, 10) : rawDate,
+    );
+    if (date === '') continue;
+    const scode = typeof row.SCODE === 'string' ? row.SCODE : '';
+    if (scode !== '' && scode !== code) continue;
+    const balanceRaw = toNumber(row[EM_RZRQ_FIELD.BALANCE]);
+    const netBuyRaw = toNumber(row[EM_RZRQ_FIELD.NET_BUY]);
+    rows.push({
+      code,
+      date,
+      balanceYi: balanceRaw === null ? null : balanceRaw * YUAN_TO_YI,
+      netBuyYi: netBuyRaw === null ? null : netBuyRaw * YUAN_TO_YI,
+    });
+  }
+  return rows;
 };
 
 /**

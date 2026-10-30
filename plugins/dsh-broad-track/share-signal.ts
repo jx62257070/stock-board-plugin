@@ -35,12 +35,23 @@
  * 本模块不碰网络与宿主能力，输入全是落库行 → 可喂固定数据断言。
  */
 import {
+  BROAD_ADVICE_ACTION_DETAIL,
+  BROAD_ADVICE_ACTION_LABEL,
+  ADVICE_EVIDENCE_WINDOW_DAYS,
+  ADVICE_ENTER_DEEP_DD_PCT,
+  ADVICE_EXIT_NEAR_HIGH_PCT,
+  ADVICE_FAST_CONFIRM_DAYS_ENTER,
+  ADVICE_FAST_CONFIRM_DAYS_EXIT,
+  ADVICE_FOLLOW_RATIO_ENTER,
+  ADVICE_FOLLOW_RATIO_EXIT,
+  ADVICE_STRONG_AMOUNT_FACTOR,
   BACKTEST_HOLD_DAYS,
   CAMPAIGN_SILENT_END_DAYS,
   CAMPAIGN_SUSPECT_AMOUNT_FACTOR,
   CAMPAIGN_SUSPECT_STREAK,
   EXIT_COMPLETION_CLEARED_PCT,
   EXIT_COMPLETION_LIGHT_PCT,
+  INST_RATIO_FALLBACK,
   SHARE_SPLIT_CONFIRM_DAYS,
   SHARE_SPLIT_PRICE_TOLERANCE,
   SHARE_SPLIT_RATIO_MAX,
@@ -51,9 +62,15 @@ import {
   SIGNAL_EXIT_NEAR_HIGH_PCT,
   SIGNAL_EXIT_MIN_AMOUNT,
   SIGNAL_EXIT_STREAK,
+  YUAN_PER_YI,
 } from './constants';
+import type { OperationAdviceAction } from './constants';
 import type {
+  AnchorHolding,
   ComboSharePoint,
+  EtfDailyRow,
+  EtfHolderRow,
+  EtfMarginRow,
   EtfShareRow,
   ShareBacktestSample,
   ShareBacktestStat,
@@ -179,6 +196,196 @@ export const neutralizeShareSplits = (
       amountYi: row.price === null ? null : deltaYi * row.price,
     };
   });
+};
+
+/**
+ * 国家队持仓估算序列的单日点（组合口径）
+ */
+export interface NationalSeriesPoint {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 国家队估算持仓份额（亿份） */
+  nationalSharesYi: number;
+  /** 国家队估算持仓金额（亿元；当日全部缺价为 null） */
+  nationalAmountYi: number | null;
+}
+
+/** 一只 ETF 的估算准备产物：锚点 + 分摊比例 + 日频估算份额（前缀累加） */
+interface NationalPerEtf {
+  /** 日频估算：date → 估算份额（亿份；锚点报告期后才有键） */
+  estByDate: Map<string, number>;
+  /** 日频前值填充价：date → 最近已知收盘价（元；无价为 undefined） */
+  priceByDate: Map<string, number>;
+}
+
+/**
+ * 准备单只 ETF 的估算输入（纯函数）
+ *
+ * 锚点与分摊比例口径见 {@link buildNationalSeries}；本函数做三件事：
+ * 1. 定锚点（用户配置 > 最近持有人结构粗估；**两者皆无 → 该 ETF 不参与估算**，
+ *    不做「0 起算」兜底 —— 那会把锚点后的净申赎累计画成「国家队持仓增长」曲线，
+ *    严重误导。季度同步 / 锚点配置缺失时曲线整体不出现，读数行显示 —）；
+ * 2. 定分摊比例（机构比例 × 国家队占机构比例，机构比例缺失用兜底）；
+ * 3. 锚点报告期后逐日累计：仅「**确认**操作日」（生命周期 entry_confirmed /
+ *    exit_confirmed，即色带深色段）且 Δ份额方向与战役一致时计入
+ *    `Δ × 分摊比例`（低频操作假设，疑似段不计），价格前值填充。
+ * @param rawRows 份额行（任意顺序）
+ * @param holders 持有人结构行（任意顺序）
+ * @param anchor 用户锚点（可为 null）
+ * @param nationalOfInst 国家队占机构持仓比例（0-1）
+ * @param lifecycleByDate 日期 → 生命周期状态（信号引擎输出；缺失或疑似视为观望不动）
+ * @returns 估算准备产物；无份额行 / 无锚点依据 / 锚点后无数据时为 null
+ */
+const prepareNationalPerEtf = (
+  rawRows: readonly EtfShareRow[],
+  holders: readonly EtfHolderRow[],
+  anchor: AnchorHolding | null,
+  nationalOfInst: number,
+  lifecycleByDate: ReadonlyMap<string, ShareLifecycleState>,
+): NationalPerEtf | null => {
+  if (rawRows.length === 0) return null;
+  const rows = neutralizeShareSplits(rawRows);
+
+  // 分摊比例 = 机构持有比例 × 国家队占机构比例（机构比例缺失用兜底 0.6）
+  let instRatio: number | null = null;
+  let instRatioEnd = '';
+  for (const row of holders) {
+    if (row.instRatio !== null && row.periodEnd > instRatioEnd) {
+      instRatio = row.instRatio;
+      instRatioEnd = row.periodEnd;
+    }
+  }
+  const instShare = instRatio !== null ? instRatio / 100 : INST_RATIO_FALLBACK;
+  const nationalShare = instShare * nationalOfInst;
+
+  // 锚点：用户配置 > 最近一期持有人结构粗估；两者皆无 → 不参与估算（见 JSDoc 1）
+  let anchorSharesYi: number;
+  let anchorPeriodEnd: string;
+  if (anchor && Number.isFinite(anchor.sharesYi)) {
+    anchorSharesYi = anchor.sharesYi;
+    anchorPeriodEnd = anchor.periodEnd;
+  } else {
+    let latest: EtfHolderRow | null = null;
+    for (const row of holders) {
+      if (
+        row.totalSharesYi !== null &&
+        row.instRatio !== null &&
+        (latest === null || row.periodEnd > latest.periodEnd)
+      ) {
+        latest = row;
+      }
+    }
+    if (
+      latest &&
+      latest.totalSharesYi !== null &&
+      latest.instRatio !== null
+    ) {
+      anchorSharesYi = latest.totalSharesYi * (latest.instRatio / 100) * nationalOfInst;
+      anchorPeriodEnd = latest.periodEnd;
+    } else {
+      return null;
+    }
+  }
+
+  // 锚点报告期后逐日累计（低频操作假设：只计确认操作日）；价格前值填充
+  const estByDate = new Map<string, number>();
+  const priceByDate = new Map<string, number>();
+  let est = anchorSharesYi;
+  let lastPrice: number | undefined;
+  for (const row of rows) {
+    if (row.price !== null && row.price > 0) lastPrice = row.price;
+    if (row.date <= anchorPeriodEnd) continue;
+    const lifecycle = lifecycleByDate.get(row.date);
+    const isEntryDay = lifecycle === 'entry_confirmed' && row.deltaYi > 0;
+    const isExitDay = lifecycle === 'exit_confirmed' && row.deltaYi < 0;
+    if (isEntryDay || isExitDay) est += row.deltaYi * nationalShare;
+    estByDate.set(row.date, est);
+    if (lastPrice !== undefined) priceByDate.set(row.date, lastPrice);
+  }
+  if (estByDate.size === 0) return null;
+  return { estByDate, priceByDate };
+};
+
+/**
+ * 构建组合口径的「国家队持仓估算」日频序列（纯函数）
+ *
+ * 分层口径（与 `estimate.ts` 的 estimateEtf 同思想，但按**日频**滚动）：
+ * 1. **锚点层**：用户配置的锚点优先；否则取最近一期持有人结构
+ *    `总份额 × 机构比例 × 国家队占机构比例` 粗估；**两者皆无时该 ETF
+ *    不参与估算**（不做 0 起算兜底 —— 那会把锚点后的净申赎累计误画成
+ *    国家队持仓增长曲线；全部 ETF 都无依据时返回空数组，界面不画）；
+ * 2. **滚动层（低频操作假设）**：锚点后国家队**持有不动**，只在信号引擎
+ *    判定「**确认**操作」的日子（entry_confirmed / exit_confirmed，即色带
+ *    深色段）按 `机构比例 × 国家队占机构比例` 参与当日申赎（进场段计正 Δ、
+ *    退场段计负 Δ，方向不符的不计）。疑似段不算 —— 疑似覆盖的日子太多
+ *    （实测 168/193），会把「低频阶梯」稀释成准连续曲线；
+ *    ⚠️ 不要改成「每日净申赎等比例分摊」—— 数学上那只是组合总份额的
+ *    恒比例缩放（est = shares × 占比），曲线形状与组合折线完全相同，
+ *    信息量为零；确认日假设下曲线呈真阶梯，国家队独立行为才可见；
+ * 3. **折现层**：估算份额 × 当日收盘价（缺价前值填充）= 估算金额。
+ *
+ * ⚠️ **曲线从锚点报告期后第一天起画**：锚点前的国家队份额不可知，
+ * 画常数段会错误暗示「一直在持仓」。
+ *
+ * ⚠️ **这是推定而非确证**：持有人结构半年才披露一次，锚点天然滞后；
+ * 「疑似 / 确认操作日」由信号引擎给出（同一套三条件判定）。用途是
+ * 「趋势参考」，绝对数值仅供量级感受。
+ *
+ * @param sharesByCode 代码 → 份额行（任意顺序，内部折算中和 + 排序）
+ * @param holdersByCode 代码 → 持有人结构行（任意顺序）
+ * @param anchors 用户配置的锚点（优先于持有人结构粗估）
+ * @param nationalOfInst 国家队占机构持仓比例（0-1）
+ * @param lifecycleByDate 日期 → 生命周期状态（信号引擎输出；缺失或疑似视为观望不动）
+ * @returns 逐日估算序列（升序；全部 ETF 无可用锚点时为空数组）
+ */
+export const buildNationalSeries = (
+  sharesByCode: ReadonlyMap<string, readonly EtfShareRow[]>,
+  holdersByCode: ReadonlyMap<string, readonly EtfHolderRow[]>,
+  anchors: readonly AnchorHolding[],
+  nationalOfInst: number,
+  lifecycleByDate: ReadonlyMap<string, ShareLifecycleState> = new Map(),
+): NationalSeriesPoint[] => {
+  const anchorByCode = new Map(anchors.map((item) => [item.code, item]));
+  const prepared: NationalPerEtf[] = [];
+  for (const [code, rows] of sharesByCode.entries()) {
+    const item = prepareNationalPerEtf(
+      rows,
+      holdersByCode.get(code) ?? [],
+      anchorByCode.get(code) ?? null,
+      nationalOfInst,
+      lifecycleByDate,
+    );
+    if (item) prepared.push(item);
+  }
+  if (prepared.length === 0) return [];
+
+  // 日期并集（升序），逐日聚合各 ETF 的估算份额与金额
+  const dateSet = new Set<string>();
+  for (const item of prepared) {
+    for (const date of item.estByDate.keys()) dateSet.add(date);
+  }
+  const points: NationalSeriesPoint[] = [];
+  for (const date of [...dateSet].sort()) {
+    let sharesSum = 0;
+    let amountSum = 0;
+    let amountCount = 0;
+    for (const item of prepared) {
+      const est = item.estByDate.get(date);
+      if (est === undefined) continue;
+      sharesSum += est;
+      const price = item.priceByDate.get(date);
+      if (price !== undefined) {
+        amountSum += est * price;
+        amountCount += 1;
+      }
+    }
+    points.push({
+      date,
+      nationalSharesYi: sharesSum,
+      nationalAmountYi: amountCount > 0 ? amountSum : null,
+    });
+  }
+  return points;
 };
 
 /**
@@ -848,4 +1055,354 @@ export const recentNetFlow = (
     else totalYi += point.netFlowYi;
   }
   return { totalYi, missingDays };
+};
+
+/** 单日操作建议（生命周期 + 证据评分 → 用户动作） */
+export interface OperationAdvicePoint {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 建议档位 */
+  action: OperationAdviceAction;
+  /** 建议标题（档位文案；当前建议含战役上下文后缀） */
+  title: string;
+  /** 建议说明（静态口径 + 当前建议的战役数据） */
+  detail: string;
+  /** 着色档位（跟随买 = up 红，跟随卖 = down 绿，观望 = flat 灰） */
+  tone: 'up' | 'down' | 'flat';
+  /** 证据评分（通过数 / 可判数；无可判证据为 '—'） */
+  scoreText: string;
+  /** 逐条证据明细（只在疑似 / 确认状态下非空） */
+  evidences: AdviceEvidence[];
+}
+
+/** 一条建议证据（评分的单项，全部可复算） */
+export interface AdviceEvidence {
+  /** 证据键 */
+  key: 'amount' | 'speed' | 'position' | 'mainflow' | 'margin';
+  /** 展示名 */
+  label: string;
+  /** 判定结果（missing 不参与评分，分数按可判项归一） */
+  status: 'pass' | 'fail' | 'missing';
+  /** 人类可读的判定说明（含数值） */
+  detail: string;
+}
+
+/**
+ * 操作建议的输入（证据评分需要份额战役之外的独立维度）
+ */
+export interface OperationAdviceInput {
+  /** 逐日信号（升序；buildShareSignalTimeline 输出） */
+  timeline: readonly ShareSignalDay[];
+  /** 战役列表（升序；buildShareCampaigns 输出） */
+  campaigns: readonly ShareCampaignWave[];
+  /** 组合逐日序列（升序；与 timeline 同刻度同长度） */
+  comboPoints: readonly ComboSharePoint[];
+  /** 代码 → 日频行（主力资金流证据用；可传空 map = 证据缺失） */
+  dailyByCode: ReadonlyMap<string, readonly EtfDailyRow[]>;
+  /** 代码 → 两融余额行（杠杆证据用；可传空 map = 证据缺失） */
+  marginByCode: ReadonlyMap<string, readonly EtfMarginRow[]>;
+}
+
+/**
+ * 证据评分的门槛（按战役方向）
+ * @param level 战役方向
+ * @returns 确认门槛（亿元）
+ */
+const adviceThresholdOf = (level: 'enter' | 'exit'): number =>
+  level === 'enter' ? SIGNAL_ENTER_MIN_AMOUNT : SIGNAL_EXIT_MIN_AMOUNT;
+
+/**
+ * 计算一场战役截至某日的 5 项证据（纯函数，闭包内的数据查表）
+ *
+ * 口径（全部只用截至当日的数据，无前视）：
+ * - **金额规模**：段内累计净申赎 ≥ 门槛 × ADVICE_STRONG_AMOUNT_FACTOR
+ *   （确认本身只要求 1 倍门槛，2 倍才算「强战役」）；
+ * - **确认速度**：段起始到当日 ≤ ADVICE_FAST_CONFIRM_DAYS_ENTER / EXIT 个
+ *   交易日（进退场分档：进场急战才真，退场天然拖尾放宽到 8 日）；
+ * - **指数位置**：进场 = 距前高回撤 ≤ ADVICE_ENTER_DEEP_DD_PCT（越深越像护盘）；
+ *   退场 = 距前高 ≥ ADVICE_EXIT_NEAR_HIGH_PCT（比确认门槛 -2% 更贴前高，
+ *   高位派发才危险）；
+ * - **主力同向**：近 ADVICE_EVIDENCE_WINDOW_DAYS 日清单主力净流入合计与
+ *   战役同向（国家队一级申赎通常伴随二级市场主力流入 / 流出）；
+ * - **两融同向（共振口径）**：近 ADVICE_EVIDENCE_WINDOW_DAYS 日清单融资
+ *   余额变化与战役同向——进场时 ≥ 0（国家队申购护住指数，杠杆资金跟进加仓，
+ *   情绪与资金共振）、退场时 ≤ 0（杠杆同步撤退）。
+ *   ⚠️ 口径由真实数据回测择优（.ai/bt/scan-advice-score.cjs，29 场确认进场）：
+ *   共振口径强组（通过率 ≥ 0.6）25 场 20 日均 +6.12% / 胜率 68%，弱组 4 场
+ *   -5.19% / 25%；曾被寄望的「对手方口径」（进场时杠杆去化 = 筹码换手）实测
+ *   **反向**——强组 +4.13% / 58% 反而不如弱组 +6.62% / 80%，弃用。
+ *
+ * 数据未覆盖时该证据标 missing（不参与评分），**不猜 0**。
+ * @param comboPoints 组合逐日序列（升序）
+ * @param drawdowns 组合指数逐日回撤（与 comboPoints 等长；缺失为 null）
+ * @param dailyByCode 代码 → 日频行（主力资金证据；空 map = 缺失）
+ * @param marginByCode 代码 → 两融行（杠杆证据；空 map = 缺失）
+ * @param indexByDate 日期 → 组合序列索引
+ * @returns 证据评估函数 `(campaign, asOfIdx) => 5 项证据`
+ */
+const makeEvidenceEvaluator = (
+  comboPoints: readonly ComboSharePoint[],
+  drawdowns: readonly (number | null)[],
+  dailyByCode: ReadonlyMap<string, readonly EtfDailyRow[]>,
+  marginByCode: ReadonlyMap<string, readonly EtfMarginRow[]>,
+  indexByDate: ReadonlyMap<string, number>,
+) => {
+  // 主力资金逐日合计（元）：某日全部 ETF 都缺主力口径 → 该日无键 → 缺失
+  const mainFlowByDate = new Map<string, number>();
+  for (const rows of dailyByCode.values()) {
+    for (const row of rows) {
+      if (row.mainInflow === null) continue;
+      mainFlowByDate.set(row.date, (mainFlowByDate.get(row.date) ?? 0) + row.mainInflow);
+    }
+  }
+
+  // 两融余额逐日合计（亿元）：当日一只 ETF 都没余额数据 → 缺失
+  const marginBalanceByDate = new Map<string, { sum: number; count: number }>();
+  for (const rows of marginByCode.values()) {
+    for (const row of rows) {
+      if (row.balanceYi === null) continue;
+      const bucket = marginBalanceByDate.get(row.date) ?? { sum: 0, count: 0 };
+      bucket.sum += row.balanceYi;
+      bucket.count += 1;
+      marginBalanceByDate.set(row.date, bucket);
+    }
+  }
+
+  return (campaign: ShareCampaignWave, asOfIdx: number): AdviceEvidence[] => {
+    const evidences: AdviceEvidence[] = [];
+    const enter = campaign.level === 'enter';
+    const startIdx = indexByDate.get(campaign.startDate);
+    const threshold = adviceThresholdOf(campaign.level);
+
+    // ① 金额规模
+    let flow = 0;
+    if (startIdx !== undefined) {
+      for (let i = startIdx; i <= asOfIdx; i += 1) flow += comboPoints[i].netFlowYi ?? 0;
+    }
+    const strongFlow = threshold * ADVICE_STRONG_AMOUNT_FACTOR;
+    evidences.push({
+      key: 'amount',
+      label: '金额规模',
+      status: Math.abs(flow) >= strongFlow ? 'pass' : 'fail',
+      detail: `段内累计净${enter ? '申购' : '赎回'} ${Math.abs(flow).toFixed(0)} 亿元，`
+        + `${Math.abs(flow) >= strongFlow ? '达到' : '未达到'}强度线 ${strongFlow} 亿元（确认门槛 ${threshold} 亿 × ${ADVICE_STRONG_AMOUNT_FACTOR}）`,
+    });
+
+    // ② 确认速度（进退场分档：国家队撤退天然拖尾，退场口径放宽）
+    const fastDays = enter ? ADVICE_FAST_CONFIRM_DAYS_ENTER : ADVICE_FAST_CONFIRM_DAYS_EXIT;
+    const days = startIdx === undefined ? 0 : asOfIdx - startIdx + 1;
+    evidences.push({
+      key: 'speed',
+      label: '确认速度',
+      status: days > 0 && days <= fastDays ? 'pass' : 'fail',
+      detail: `历时 ${days} 个交易日，${days <= fastDays ? '急战形态（国家队级动作通常一口气完成）' : '拖沓阴跌 / 缓涨，更像分散资金行为'}`,
+    });
+
+    // ③ 指数位置
+    const dd = drawdowns[asOfIdx] ?? null;
+    if (dd === null) {
+      evidences.push({ key: 'position', label: '指数位置', status: 'missing', detail: '指数数据缺失' });
+    } else if (enter) {
+      const pass = dd <= ADVICE_ENTER_DEEP_DD_PCT;
+      evidences.push({
+        key: 'position',
+        label: '指数位置',
+        status: pass ? 'pass' : 'fail',
+        detail: `距前高回撤 ${dd.toFixed(1)}%，${pass ? '深跌护盘形态' : '回撤不足（≥ 12% 深跌更典型）'}`,
+      });
+    } else {
+      const pass = dd >= ADVICE_EXIT_NEAR_HIGH_PCT;
+      evidences.push({
+        key: 'position',
+        label: '指数位置',
+        status: pass ? 'pass' : 'fail',
+        detail: `距前高 ${Math.abs(dd).toFixed(1)}%，${pass ? '高位派发形态' : '距前高尚远（< 1% 更典型）'}`,
+      });
+    }
+
+    // ④ 主力同向
+    const windowStart = Math.max(0, asOfIdx - ADVICE_EVIDENCE_WINDOW_DAYS + 1);
+    let mainSum = 0;
+    let mainDays = 0;
+    for (let i = windowStart; i <= asOfIdx; i += 1) {
+      const value = mainFlowByDate.get(comboPoints[i].date);
+      if (value === undefined) continue;
+      mainSum += value;
+      mainDays += 1;
+    }
+    if (mainDays === 0) {
+      evidences.push({
+        key: 'mainflow',
+        label: '主力同向',
+        status: 'missing',
+        detail: `资金流数据未覆盖该日期段（东财 fflow 只回溯 ${'~121'} 个交易日）`,
+      });
+    } else {
+      const sumYi = mainSum / YUAN_PER_YI;
+      const pass = enter ? mainSum > 0 : mainSum < 0;
+      evidences.push({
+        key: 'mainflow',
+        label: '主力同向',
+        status: pass ? 'pass' : 'fail',
+        detail: `近 ${ADVICE_EVIDENCE_WINDOW_DAYS} 日清单主力净流入合计 ${sumYi >= 0 ? '+' : ''}${sumYi.toFixed(1)} 亿元，`
+          + `${pass ? '与国家队同向' : '与国家队反向（二级市场未跟随）'}`,
+      });
+    }
+
+    // ⑤ 两融同向（共振口径，2026-10-28 回测择优）
+    const startBucket = marginBalanceByDate.get(comboPoints[windowStart].date);
+    const endBucket = marginBalanceByDate.get(comboPoints[asOfIdx].date);
+    if (!startBucket || !endBucket) {
+      evidences.push({
+        key: 'margin',
+        label: '两融同向',
+        status: 'missing',
+        detail: '两融数据未覆盖该日期段（同步后即有）',
+      });
+    } else {
+      const delta = endBucket.sum - startBucket.sum;
+      const pass = enter ? delta >= 0 : delta <= 0;
+      evidences.push({
+        key: 'margin',
+        label: '两融同向',
+        status: pass ? 'pass' : 'fail',
+        detail: `近 ${ADVICE_EVIDENCE_WINDOW_DAYS} 日清单融资余额变化 ${delta >= 0 ? '+' : ''}${delta.toFixed(1)} 亿元，`
+          + `${pass ? '杠杆资金与国家队共振' : '杠杆资金未跟进（情绪未共振）'}`,
+      });
+    }
+
+    return evidences;
+  };
+};
+
+/**
+ * 生命周期 + 证据通过率 → 建议档位（门控表）
+ *
+ * 不再机械映射：**疑似 + 证据强才试探 / 留意（弱疑似观望 / 持有）；
+ * 确认 + 证据强才跟随（弱确认降档为试探 / 留意）**。通过率 = 通过数 ÷
+ * 可判证据数（缺失不计分母）；全部缺失视为证据不足 → 一律按弱处理。
+ * @param lifecycle 生命周期状态
+ * @param evidences 证据列表（可空 = 无可判证据）
+ * @returns 建议档位与着色
+ */
+const gateAdviceAction = (
+  lifecycle: ShareLifecycleState,
+  evidences: readonly AdviceEvidence[],
+): { action: OperationAdviceAction; tone: 'up' | 'down' | 'flat' } => {
+  const judgeable = evidences.filter((item) => item.status !== 'missing');
+  const passCount = evidences.filter((item) => item.status === 'pass').length;
+  const ratio = judgeable.length > 0 ? passCount / judgeable.length : null;
+  const enter = lifecycle === 'entry_suspected' || lifecycle === 'entry_confirmed';
+  const ratioLine = enter ? ADVICE_FOLLOW_RATIO_ENTER : ADVICE_FOLLOW_RATIO_EXIT;
+  const strong = ratio !== null && ratio >= ratioLine;
+  switch (lifecycle) {
+    case 'entry_suspected':
+      return strong ? { action: 'probe', tone: 'up' } : { action: 'flat', tone: 'flat' };
+    case 'entry_confirmed':
+      return strong ? { action: 'buy', tone: 'up' } : { action: 'probe', tone: 'up' };
+    case 'exit_suspected':
+      return strong ? { action: 'trim_watch', tone: 'down' } : { action: 'hold', tone: 'flat' };
+    case 'exit_confirmed':
+      return strong ? { action: 'sell', tone: 'down' } : { action: 'trim_watch', tone: 'down' };
+    case 'entry_done':
+    case 'holding':
+      return { action: 'hold', tone: 'flat' };
+    case 'exit_done':
+    case 'watching':
+      return { action: 'flat', tone: 'flat' };
+  }
+};
+
+/**
+ * 构建用户操作建议序列（纯函数，证据评分制）
+ *
+ * 口径：建议档位 = **生命周期门控 × 独立证据通过率**，两步走：
+ * 1. 每场战役按 5 项可复算证据评分（金额规模 / 确认速度 / 指数位置 /
+ *    主力同向 / 两融同向，口径见 makeEvidenceEvaluator）；
+ * 2. 通过率 ≥ 对应方向门槛（进场 ADVICE_FOLLOW_RATIO_ENTER、退场 ADVICE_FOLLOW_RATIO_EXIT）才「升档」（确认 → 跟随进出、疑似 →
+ *    试探 / 留意），否则「降档」（确认 → 试探 / 留意、疑似 → 观望 / 持有）。
+ * 数据缺失的证据不参与评分（分数按可判项归一），不猜 0。
+ *
+ * 输出两份：
+ * - `current`：最新交易日的建议（含证据明细 + 进行中战役的上下文），界面重点展示；
+ * - `changes`：建议档位发生变化的交易日列表（升序，含首日）。
+ *
+ * @param input 建议输入（时间线 + 战役 + 组合序列 + 资金流 + 两融）
+ * @returns 当前建议（无数据为 null）与建议变化点
+ */
+export const buildOperationAdvice = (
+  input: OperationAdviceInput,
+): { current: OperationAdvicePoint | null; changes: OperationAdvicePoint[] } => {
+  const { timeline, campaigns, comboPoints, dailyByCode, marginByCode } = input;
+  if (timeline.length === 0) return { current: null, changes: [] };
+
+  const indexByDate = new Map(comboPoints.map((point, index) => [point.date, index] as const));
+
+  // 一个组合交易日最多属于一场战役（方向段不重叠）
+  const campaignByIdx = new Map<number, ShareCampaignWave>();
+  for (const campaign of campaigns) {
+    const startIdx = indexByDate.get(campaign.startDate);
+    const endIdx = indexByDate.get(campaign.endDate);
+    if (startIdx === undefined || endIdx === undefined) continue;
+    for (let i = startIdx; i <= endIdx; i += 1) campaignByIdx.set(i, campaign);
+  }
+
+  const evaluateEvidence = makeEvidenceEvaluator(
+    comboPoints,
+    drawdownPctSeries(comboPoints.map((point) => point.avgPrice)),
+    dailyByCode,
+    marginByCode,
+    indexByDate,
+  );
+
+  const points: OperationAdvicePoint[] = timeline.map((day) => {
+    const comboIdx = indexByDate.get(day.date);
+    const campaign = comboIdx === undefined ? undefined : campaignByIdx.get(comboIdx);
+    // 证据只在「疑似 / 确认」状态下参与门控；观望 / 持仓 / 结束态无需评分
+    const scoringState =
+      day.lifecycle === 'entry_suspected' || day.lifecycle === 'entry_confirmed'
+      || day.lifecycle === 'exit_suspected' || day.lifecycle === 'exit_confirmed';
+    const evidences =
+      campaign !== undefined && comboIdx !== undefined && scoringState
+        ? evaluateEvidence(campaign, comboIdx)
+        : [];
+    const gated = gateAdviceAction(day.lifecycle, evidences);
+    const judgeable = evidences.filter((item) => item.status !== 'missing');
+    const passCount = evidences.filter((item) => item.status === 'pass').length;
+    return {
+      date: day.date,
+      action: gated.action,
+      tone: gated.tone,
+      title: BROAD_ADVICE_ACTION_LABEL[gated.action],
+      detail: BROAD_ADVICE_ACTION_DETAIL[gated.action],
+      scoreText: judgeable.length > 0 ? `${passCount}/${judgeable.length}` : '—',
+      evidences,
+    };
+  });
+
+  // 变化点：首日 + 与前一日档位不同的日子
+  const changes = points.filter(
+    (point, index) => index === 0 || point.action !== points[index - 1].action,
+  );
+
+  // 当前建议追加进行中战役的上下文（确认第几天 / 段内累计净申赎）
+  const last = points[points.length - 1];
+  const ongoing = campaigns.length > 0 ? campaigns[campaigns.length - 1] : null;
+  if (ongoing && ongoing.endReason === 'eof') {
+    const anchorDate = ongoing.confirmDate ?? ongoing.suspectDate ?? ongoing.startDate;
+    const anchorIndex = timeline.findIndex((day) => day.date === anchorDate);
+    const daysIn = anchorIndex >= 0 ? timeline.length - anchorIndex : 0;
+    const flowText = `${ongoing.netFlowYi >= 0 ? '+' : ''}${ongoing.netFlowYi.toFixed(0)} 亿`;
+    if (last.action === 'buy' || last.action === 'probe') {
+      const stage = ongoing.confirmDate ? `确认第 ${daysIn} 天` : `疑似第 ${daysIn} 天`;
+      last.title += `（${stage}，段内累计 ${flowText}）`;
+      last.detail += ` 当前战役：${ongoing.startDate} 起，段内累计净申购 ${flowText}。`;
+    } else if (last.action === 'sell' || last.action === 'trim_watch') {
+      const stage = ongoing.confirmDate ? `确认第 ${daysIn} 天` : `疑似第 ${daysIn} 天`;
+      last.title += `（${stage}，段内累计 ${flowText}）`;
+      last.detail += ` 当前战役：${ongoing.startDate} 起，段内累计净赎回 ${flowText}。`;
+    }
+  }
+
+  return { current: last, changes };
 };

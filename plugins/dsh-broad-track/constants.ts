@@ -250,13 +250,38 @@ export const EXCHANGE_RETRY_DELAY_MS = 1200;
 /**
  * 份额序列回溯起点（2024-01-01）
  *
- * 覆盖用户关心的全部历史拐点：2024-02 的 2800 点底部进场、2024-09 的 924 行情、
- * 2025-04 的关税战护盘、2026-01 的规模减持退场。
+ * 覆盖国家队时代（汇金 / 国新 / 诚通入场）的全部历史拐点：2024-02 的 2800 点
+ * 底部进场、2024-09 的 924 行情、2025-04 的关税战护盘、2026-01 的规模减持退场。
+ *
+ * ⚠️ **刻意不回溯到 2021-2023（2026-10-29 全量回填实测后的决策）**：
+ * 把 2021-01 起的 727 个交易日真实回填后重跑战役识别——新增 46 场「进场」战役
+ * 胜率只有 46%（2024+ 时代 62%）、20 日均 -1.0%，退场 0 场。那三年宽基 ETF
+ * 处于份额单边扩张期，常态化净申购把「连续申购 = 国家队进场」的信号淹成噪音；
+ * 且同步链路信号金额门槛是固定值（20 亿），在 ETF 总盘子涨了数倍的 2024+ 才
+ * 校准过，不能跨时代外推。要深挖更早历史可临时用 syncShareSeries 的
+ * startDate 选项（链路已放宽：TENCENT_KLINE_COUNT_MAX / SHARE_HISTORY_MAX_DAYS
+ * 支持回溯到 2020 年），但校准需按时代分开做。
  */
 export const SHARE_HISTORY_START = '2024-01-01';
 
-/** 份额序列保留天数（上游按日全量给，这里只做兜底上限） */
-export const SHARE_HISTORY_MAX_DAYS = 1200;
+/**
+ * 份额序列保留天数（日历日口径，dateRange 循环的兜底上限）
+ *
+ * ⚠️ 2021-01-01 → 2026-10 约 2132 个日历日，此值必须 ≥ 回溯区间的日历日数，
+ * 否则 dateRange 会静默截掉尾部日期。同时该值不再直接用作腾讯 K 线条数
+ * （见 TENCENT_KLINE_COUNT_MAX）。
+ */
+export const SHARE_HISTORY_MAX_DAYS = 2400;
+
+/**
+ * 腾讯历史日 K 单次请求的条数上限（2026-10-29 实测）
+ *
+ * ≤ 2000 正常返回区间内全部行（2021→今约 1409 个交易日）；≥ 2200 直接返回
+ * 空数组（上游硬上限在 2000~2200 之间）。因此 K 线条数不能共用日历日口径的
+ * SHARE_HISTORY_MAX_DAYS，取 min(两者)；区间交易日数超过 2000（约 8 年前起算）
+ * 时需分次请求，当前起点 2021 年内用不到。
+ */
+export const TENCENT_KLINE_COUNT_MAX = 2000;
 
 // ---------- 份额折算（合并 / 拆分）中和 ----------
 
@@ -321,8 +346,12 @@ export const SIGNAL_ENTER_MIN_AMOUNT = 20;
  * - 份额连续净减天数 ≥ SIGNAL_EXIT_STREAK；
  * - 且组合指数接近前高（距前高回撤 ≥ SIGNAL_EXIT_NEAR_HIGH_PCT，即「涨到高点附近」）；
  * - 且区间净赎回金额 ≥ SIGNAL_EXIT_MIN_AMOUNT（亿元，绝对值）。
+ *
+ * STREAK=5 的依据（2026-10-28 参数扫描，.ai/bt/scan-exit-params.cjs，679 交易日）：
+ * streak 2→6 天信号后 20 日均持收益单调改善（+1.16 → -0.56%），3 天易被噪音触发；
+ * MIN_AMOUNT 10~50 亿无区分度、NEAR_HIGH_PCT=-2 最优（放宽反而变差），均维持不动。
  */
-export const SIGNAL_EXIT_STREAK = 3;
+export const SIGNAL_EXIT_STREAK = 5;
 
 /** 退场信号的「接近前高」阈值（%，负数；-2 = 距前高不足 2%） */
 export const SIGNAL_EXIT_NEAR_HIGH_PCT = -2;
@@ -647,6 +676,100 @@ export const FFLOW_DAYS = 30;
 /** ulist 单批 secid 数上限（ETF 14 + 指数 6 = 20，一批搞定） */
 export const ULIST_BATCH_SIZE = 40;
 
+// ---------- 两融余额（操作建议的杠杆佐证） ----------
+
+/**
+ * 东财数据中心「融资融券明细」（`RPTA_WEB_RZRQ_GGMX`）
+ *
+ * ⚠️ **ETF 覆盖已实测**（2026-10-28）：沪市 510300 与深市 159919 都有逐日行，
+ * 历史覆盖全量（510300 约 3485 行，自 2013 年起），filter 支持
+ * `(scode="510300")(DATE>='2024-01-01')` 复合条件 —— 一次请求可拿一只 ETF
+ * 自任意起点起的全部历史（pageSize=1000 足够 2024 年以来的全部交易日）。
+ *
+ * 响应形态：`{ result: { pages, data: [ { DATE, SCODE, RZYE, RZJME, … } ] } }`；
+ * 无数据时 `result` 为 `null`。`DATE` 带 `00:00:00` 时分秒后缀，解析时截前 10 位。
+ */
+export const EM_RZRQ_URL = 'https://datacenter-web.eastmoney.com/api/data/v1/get';
+
+/**
+ * 两融明细查询串（`{code}` / `{start}` / `{limit}` 由取数层替换）
+ *
+ * `filter` 里双引号 / 单引号必须原样（URL 编码由 http 层处理）；日期格式
+ * `YYYY-MM-DD`（上游接受裸日期，等值比较语义是 ≥）。
+ */
+export const EM_RZRQ_QUERY =
+  'reportName=RPTA_WEB_RZRQ_GGMX&columns=ALL'
+  + '&filter=(scode="{code}")(DATE>=\'{start}\')'
+  + '&pageNumber=1&pageSize={limit}&sortTypes=-1&sortColumns=DATE';
+
+/** 两融明细查询串里代码的占位符 */
+export const EM_RZRQ_CODE_TOKEN = '{code}';
+/** 两融明细查询串里起始日的占位符 */
+export const EM_RZRQ_START_TOKEN = '{start}';
+/** 两融明细查询串里条数的占位符 */
+export const EM_RZRQ_LIMIT_TOKEN = '{limit}';
+
+/** 两融明细请求 Referer */
+export const EM_RZRQ_REFERER = 'https://data.eastmoney.com/';
+
+/** 两融明细单页条数（⚠️ 上游实测单页上限 500：传 1000 也只回 500 行，翻页兜底） */
+export const EM_RZRQ_PAGE_SIZE = 500;
+
+/** 两融明细最大翻页数（500 行/页 × 5 页 = 2500 行，覆盖 2015 年以来的全部交易日） */
+export const EM_RZRQ_MAX_PAGES = 5;
+
+/** 两融明细响应里 `data` 行的字段名（实测口径） */
+export const EM_RZRQ_FIELD = {
+  /** 日期（`2026-10-27 00:00:00` 形态，截前 10 位） */
+  DATE: 'DATE',
+  /** 融资余额（元） */
+  BALANCE: 'RZYE',
+  /** 当日融资净买入（元；可为负） */
+  NET_BUY: 'RZJME',
+} as const;
+
+/** 两融增量重刷天数（库内最新日期之前 N 天重拉，防上游改数；与份额同步同口径） */
+export const MARGIN_REFRESH_RECENT_DAYS = 5;
+
+// ---------- 操作建议的证据评分 ----------
+
+/**
+ * 「跟随 / 试探」的证据通过率门槛（进退场分设，2026-10-28 网格回测 67392 组合择优）
+ *
+ * 通过数 ÷ 可判证据数（缺失不计分母）≥ 该值才升档（确认 → 跟随、疑似 → 试探），
+ * 否则降档（确认 → 试探 / 留意、疑似 → 观望 / 持有）。
+ * 进场 2/3：三项可判全过、四项允许挂一 —— 回测 18 场确认战役 20 日胜率 78%
+ * （基线 62%），且 2026-07~09 主力证据拦掉的批次 20 日收益全负，过滤真实有效；
+ * 退场 0.5：退场战役天然拖尾（历史 5~16 日），证据普遍偏弱，样本仅 7 场
+ * 不足以紧调，卡 0.6 反而把全部退场战役拦死（永不跟随退场）。
+ */
+export const ADVICE_FOLLOW_RATIO_ENTER = 2 / 3;
+
+/** 退场方向的证据通过率门槛（见 ADVICE_FOLLOW_RATIO_ENTER 注释） */
+export const ADVICE_FOLLOW_RATIO_EXIT = 0.5;
+
+/** 证据评分的「金额规模」档：段内累计净申赎 ≥ 门槛 × 该倍数才算强（确认本身只要求 1 倍） */
+export const ADVICE_STRONG_AMOUNT_FACTOR = 2;
+
+/**
+ * 证据评分的「确认速度」档（进退场分设）：确认历时 ≤ 该交易日数算急战。
+ * 进场 3 日：回测中 ≤3 日的批次 20 日胜率 78% vs 4~5 日的 50%；
+ * 退场 8 日：国家队撤退天然拖尾（历史退场 5~16 日才确认），按进场口径会全军覆没。
+ */
+export const ADVICE_FAST_CONFIRM_DAYS_ENTER = 3;
+
+/** 退场方向的「确认速度」档（见 ADVICE_FAST_CONFIRM_DAYS_ENTER 注释） */
+export const ADVICE_FAST_CONFIRM_DAYS_EXIT = 8;
+
+/** 证据评分的进场「位置」档：确认日回撤 ≤ 该值（比确认门槛 -8% 不更深即可）才算深跌护盘 */
+export const ADVICE_ENTER_DEEP_DD_PCT = -8;
+
+/** 证据评分的退场「位置」档：确认日距前高 ≥ 该值（比确认门槛 -2% 更贴前高）才算高位派发 */
+export const ADVICE_EXIT_NEAR_HIGH_PCT = -1;
+
+/** 「主力同向」「两融同向」证据的回看窗口（交易日） */
+export const ADVICE_EVIDENCE_WINDOW_DAYS = 5;
+
 // ---------- 预估模型 ----------
 
 /**
@@ -884,7 +1007,7 @@ export const BROAD_SHARE_CHART_TITLE = '组合份额走势与每日净申赎';
 
 /** 份额曲线卡的口径说明 */
 export const BROAD_SHARE_CHART_NOTE =
-  '三行同一时间刻度：组合总份额（蓝色折线，亿份）、每日估算净申赎（红 = 申购 / 绿 = 赎回，亿元）、逐日信号状态色带。'
+  '三行同一时间刻度：组合总份额（蓝色折线 + 灰色虚线为国家队估算持仓，亿份）、每日估算净申赎（红 = 申购 / 绿 = 赎回，亿元）、逐日信号状态色带。'
   + '全历史按每天固定宽度铺开，左右拖动查看更早的交易日，滚轮缩放疏密（以光标处为锚点）。';
 
 /** 份额卡「图解」按钮与帮助弹窗 */
@@ -897,8 +1020,12 @@ export const BROAD_SHARE_HELP_LAYERS: { title: string; scope: string; answer: st
     title: '组合份额走势与每日净申赎（上行）',
     scope: '全历史 · 逐日 · 左右拖动查看',
     answer:
-      '蓝色折线是清单内全部 ETF 的总份额（独立成行，右端即当前份额），柱是每日估算净申赎金额（Δ份额 × 当日收盘价，正 = 净申购）。'
-      + '柱高按全历史最大值归一并开方压缩（小流量日也可见，同尺度下越大越高）。标题下方读数行显示当前日期数据，随悬停 / 点击更新。',
+      '蓝色折线是清单内全部 ETF 的总份额（独立成行，右端即当前份额），灰色虚线是国家队估算持仓'
+      + '（锚点 = 最近一期持有人结构推算或用户配置；之后国家队按「持有不动、仅在信号确认进出场时参与申赎」'
+      + '的口径滚动估算，虚线呈阶梯状；量纲独立不与折线共刻度；锚点报告期之前无估算故不画；'
+      + '季度数据或锚点缺失时整条不出现），柱是每日估算净申赎金额（Δ份额 × 当日收盘价，正 = 净申购）。'
+      + '柱高按全历史最大值归一并开方压缩（小流量日也可见，同尺度下越大越高）。'
+      + '标题下方读数行显示当前日期数据（含国家队估算份额与金额），随悬停 / 点击更新。',
   },
   {
     title: '信号状态色带（下行）',
@@ -1047,3 +1174,75 @@ export const BROAD_DISCLAIMER =
   '本页为份额变动的推定工具，不构成投资建议：ETF 份额变动是全市场净申赎，不是国家队专属持仓；'
   + '「进场 / 退场」是基于「连续大额申赎 + 指数位置」的形态推定，与真实操作必然存在偏差。'
   + '数据只在点击按钮时请求上游，落本地插件库；份额来自交易所官方逐日披露。';
+
+/**
+ * 用户操作建议档位（生命周期 + 证据评分 → 动作）
+ *
+ * 六档动作不变；**档位不再由生命周期机械映射，而是由证据通过率门控**：
+ * 疑似 + 证据强 → 试探 / 留意，疑似 + 证据弱 → 观望 / 持有；
+ * 确认 + 证据强 → 跟随进出，确认 + 证据弱 → 降档为试探 / 留意。
+ * 见 buildOperationAdvice 的门控表与 5 项证据定义。
+ */
+export type OperationAdviceAction =
+  | 'probe'
+  | 'buy'
+  | 'hold'
+  | 'trim_watch'
+  | 'sell'
+  | 'flat';
+
+/** 操作建议档位展示文案 */
+export const BROAD_ADVICE_ACTION_LABEL = {
+  probe: '轻仓试探',
+  buy: '跟随进场 / 加仓',
+  hold: '持有不动',
+  trim_watch: '留意减仓',
+  sell: '跟随出场 / 减仓',
+  flat: '空仓观望',
+} as const;
+
+/** 操作建议档位说明（静态口径部分；证据明细由界面单独渲染） */
+export const BROAD_ADVICE_ACTION_DETAIL = {
+  probe: '国家队疑似在进场（或确认但证据不强），建议只小仓位试探建底仓，主仓等证据进一步齐备再加。',
+  buy: '国家队进场已确认且多项独立证据同向（金额规模 / 确认速度 / 指数位置 / 主力资金 / 两融杠杆），可分批跟随建仓 / 加仓，不建议一次性打满。',
+  hold: '国家队进场段已结束、持仓不动。已跟随者继续持有；未上车者不追高 —— 确认期已过，此时进场的盈亏比不如等下一轮信号。',
+  trim_watch: '国家队疑似在退场（或确认但证据不强），可先兑现部分利润锁定收益，剩余仓位等证据进一步齐备再减。',
+  sell: '国家队退场已确认且多项独立证据同向。历史回测确认信号后 20 日下跌概率过半，应分批跟随减仓；减仓节奏参考退场完成度（减仓中先减 1/3，轻仓减至半仓以下，清仓余仓出尽）。',
+  flat: '国家队暂无操作迹象（或疑似证据不足）。空仓 / 轻仓观望，等下一轮疑似进场信号再介入；定投计划不受此信号影响。',
+} as const;
+
+/** 操作建议档位徽标类名（只复用宿主白名单已有类） */
+export const BROAD_ADVICE_ACTION_CLASS = {
+  probe: 'bg-up-weak text-up',
+  buy: 'bg-up-weak text-up',
+  hold: 'bg-flat-weak text-text-tertiary',
+  trim_watch: 'bg-down-weak text-down',
+  sell: 'bg-down-weak text-down',
+  flat: 'bg-flat-weak text-text-tertiary',
+} as const;
+
+/** 操作建议卡标题 */
+export const BROAD_ADVICE_TITLE = '操作建议';
+
+/** 操作建议卡说明（证据评分口径 + 免责） */
+export const BROAD_ADVICE_NOTE =
+  '建议由 5 项可复算的独立证据共同判定：①金额规模（段内累计 ≥ 2 倍门槛）；'
+  + '②确认速度（进场 ≤ 3 个交易日一口气完成、退场放宽到 8 日）；'
+  + '③指数位置（进场 = 回撤更深 ≥ 8%、退场 = 更贴前高 < 1%）；'
+  + '④主力资金同向（近 5 日清单主力净流入与国家队同向）；'
+  + '⑤两融共振（近 5 日清单融资余额变化与国家队同向——进场时杠杆跟进、退场时杠杆撤退）。'
+  + '通过数 ÷ 可判证据数达到方向门槛才升档（进场 2/3、退场 50%；确认 → 跟随、疑似 → 试探），'
+  + '否则降档（确认 → 试探、疑似 → 观望）；数据缺失的证据不参与评分（分数按可判项归一）。'
+  + '参数由 2026-10-28 对 67392 组参数组合的全历史网格回测择优（进场跟随 18 场持有 20 日胜率 78%，'
+  + '不筛基线 62%；两融共振口径亦由 29 场确认进场的对照回测选出）。'
+  + '仅描述「国家队在做什么」的跟随策略，不构成投资建议。';
+
+/** 证据评分徽标前缀 */
+export const BROAD_ADVICE_SCORE_PREFIX = '证据';
+
+/** 证据状态展示符号（通过 / 不符 / 缺失） */
+export const BROAD_ADVICE_EVIDENCE_MARK = {
+  pass: '✓',
+  fail: '×',
+  missing: '—',
+} as const;

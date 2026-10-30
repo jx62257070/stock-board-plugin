@@ -21,19 +21,22 @@
  */
 import {
   EXCHANGE_DELAY_MS,
+  MARGIN_REFRESH_RECENT_DAYS,
   SHARE_HISTORY_MAX_DAYS,
   SHARE_HISTORY_START,
+  TENCENT_KLINE_COUNT_MAX,
   TRACKED_ETFS,
 } from './constants';
 import {
   addDays,
+  fetchMarginHistory,
   fetchSseShareSnapshot,
   fetchSzseShareHistory,
   fetchTencentKline,
 } from './share-data';
 import { computeShareChanges } from './share-parse';
 import type { SseShareRow, SzseShareRow, TencentKlineRow } from './share-parse';
-import type { BroadDeps, BroadScanProgress, EtfShareRow } from './types';
+import type { BroadDeps, BroadMeta, BroadScanProgress, EtfShareRow } from './types';
 import type { BroadRepo } from './storage';
 
 /**
@@ -44,6 +47,8 @@ export interface ShareSyncResult {
   warnings: string[];
   /** 落库的份额行数 */
   rowCount: number;
+  /** 落库的两融行数（失败时为 0） */
+  marginRowCount: number;
   /** 本次回源请求次数 */
   requestCount: number;
   /** 覆盖的日期区间（YYYY-MM-DD；空串 = 无数据） */
@@ -152,7 +157,10 @@ const fetchPriceMap = async (
     TRACKED_ETFS.map((etf) => async () => {
       const symbol = `${etf.market === '1' ? 'sh' : 'sz'}${etf.code}`;
       try {
-        return await fetchTencentKline(deps, symbol, start, end, SHARE_HISTORY_MAX_DAYS);
+        // 条数取「日历日兜底」与「腾讯单次上限」的较小者：
+        // 腾讯 ≥ 2200 直接回空（见 TENCENT_KLINE_COUNT_MAX 注释）
+        const count = Math.min(SHARE_HISTORY_MAX_DAYS, TENCENT_KLINE_COUNT_MAX);
+        return await fetchTencentKline(deps, symbol, start, end, count);
       } catch {
         return [] as TencentKlineRow[];
       }
@@ -416,16 +424,53 @@ export const syncShareSeries = async (
   const earliestDate = coveredDates[0] ?? '';
   const latestDate = coveredDates[coveredDates.length - 1] ?? '';
 
-  await repo.saveMeta({
+  // 7) 两融余额（操作建议的杠杆佐证；逐只一次请求，增量按库内最新日期）
+  //
+  // ⚠️ 两融是**辅助证据**：整段失败只降级（证据评分少一维，按可判项归一），
+  // 绝不因它让份额同步报失败。增量起点 = 库内最新日期前 N 天（重刷防上游改数），
+  // 首次全量从序列起点拉（pageSize 一次拿全，每只 ETF 只 1-2 次请求）。
+  let marginRowCount = 0;
+  let marginFailed = 0;
+  const latestMargin = await repo.latestMarginDate();
+  const marginStart = latestMargin !== '' ? addDays(latestMargin, -MARGIN_REFRESH_RECENT_DAYS) : start;
+  for (const etf of TRACKED_ETFS) {
+    try {
+      const rows = await fetchMarginHistory(deps, etf.code, marginStart);
+      if (rows.length > 0) {
+        await repo.saveMarginRows(rows);
+        marginRowCount += rows.length;
+      }
+      requestCount += 1;
+    } catch (error) {
+      requestCount += 1;
+      marginFailed += 1;
+      warnings.push(
+        `${etf.name}（${etf.code}）两融余额取数失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    await deps.format.delay(EXCHANGE_DELAY_MS);
+  }
+  if (marginFailed === TRACKED_ETFS.length) {
+    warnings.push(
+      '两融余额整域不可达（全部 ETF 失败）：操作建议的「两融同向」证据将缺失，'
+      + '评分按可判证据归一不受影响；稍后重新同步即可补齐',
+    );
+  }
+
+  const metaPatch: Partial<BroadMeta> = {
     shareSyncedAt: Date.now(),
     shareEarliestDate: earliestDate,
     shareLatestDate: latestDate,
     warnings,
-  });
+  };
+  // 两融全挂时不更新 marginSyncedAt（保持上次成功时间；从未成功保持 null）
+  if (marginFailed < TRACKED_ETFS.length) metaPatch.marginSyncedAt = Date.now();
+  await repo.saveMeta(metaPatch);
 
   return {
     warnings,
     rowCount: saveRows.length,
+    marginRowCount,
     requestCount,
     earliestDate,
     latestDate,

@@ -197,6 +197,24 @@ export interface ShareBacktestSample {
   indexLevel: number | null;
 }
 
+/**
+ * 一只 ETF 在一个交易日的**两融余额**行（落库 `etf_margin_daily`）
+ *
+ * 融资余额是杠杆资金的仓位痕迹：国家队进场时杠杆去化（余额下降）= 筹码
+ * 从弱手换到强手；退场时杠杆接力（余额上升）= 散户杠杆在接盘。
+ * 是操作建议证据评分的独立维度（与份额、主力资金流互不重复）。
+ */
+export interface EtfMarginRow {
+  /** 交易日（YYYY-MM-DD） */
+  date: string;
+  /** 6 位裸代码 */
+  code: string;
+  /** 融资余额（亿元；缺失为 null） */
+  balanceYi: number | null;
+  /** 当日融资净买入（亿元，正 = 杠杆加仓；缺失为 null） */
+  netBuyYi: number | null;
+}
+
 /** ulist 批量行情的一行（ETF 或指数） */
 export interface QuoteRow {
   /** 代码（ETF 为 6 位裸码，指数为 000300 形态） */
@@ -293,6 +311,8 @@ export interface BroadMeta {
   shareEarliestDate: string;
   /** 份额序列已覆盖的最新日期（YYYY-MM-DD；未同步为空串） */
   shareLatestDate: string;
+  /** 两融余额同步完成时间（毫秒时间戳；从未同步为 null） */
+  marginSyncedAt: number | null;
 }
 
 /** 一只 ETF 的国家队持仓预估（展示口径，现算不落库） */
@@ -369,6 +389,8 @@ export interface BroadSnapshot {
   sharesByCode: Map<string, EtfShareRow[]>;
   /** 份额数据的日期集合（升序） */
   shareDates: string[];
+  /** 代码 → 两融余额行（升序） */
+  marginByCode: Map<string, EtfMarginRow[]>;
   /** 代码 → 季度行（按期降序） */
   quartersByCode: Map<string, EtfQuarterRow[]>;
   /** 代码 → 持有人结构行（按期降序） */

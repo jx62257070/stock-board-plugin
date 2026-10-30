@@ -24,6 +24,7 @@ import type {
   BroadSnapshot,
   EtfDailyRow,
   EtfHolderRow,
+  EtfMarginRow,
   EtfQuarterRow,
   EtfShareRow,
 } from './types';
@@ -35,10 +36,24 @@ export const BROAD_DAILY_TABLE = 'etf_daily';
 /** 份额日频表名（物理表 `plugin_dsh_broad_track_etf_share_daily`） */
 export const BROAD_SHARE_TABLE = 'etf_share_daily';
 
-/** 季度份额表名 */
-export const BROAD_QUARTER_TABLE = 'etf_quarter';
+/** 两融余额日频表名（物理表 `plugin_dsh_broad_track_etf_margin_daily`） */
+export const BROAD_MARGIN_TABLE = 'etf_margin_daily';
 
-/** 持有人结构表名 */
+/**
+ * 两融余额日频表的列声明
+ *
+ * 唯一键（date, code）；`balance_yi` 为融资余额（亿元）、`net_buy_yi` 为当日
+ * 融资净买入（亿元）。与份额表同构（按日 upsert，增量同步只拉缺口）。
+ */
+export const BROAD_MARGIN_COLUMNS: readonly PluginDbColumn[] = [
+  { name: 'date', type: 'text', indexed: true },
+  { name: 'code', type: 'text', indexed: true },
+  { name: 'balance_yi', type: 'real' },
+  { name: 'net_buy_yi', type: 'real' },
+];
+
+/** 季度份额表名 */
+export const BROAD_QUARTER_TABLE = 'etf_quarter';/** 持有人结构表名 */
 export const BROAD_HOLDERS_TABLE = 'etf_holders';
 
 /** 锚点表名 */
@@ -153,6 +168,16 @@ export interface BroadRepo {
    */
   existingShareDates: () => Promise<string[]>;
   /**
+   * 落库两融余额行（按 (date, code) upsert）
+   * @param rows 两融行
+   */
+  saveMarginRows: (rows: readonly EtfMarginRow[]) => Promise<void>;
+  /**
+   * 读两融余额已覆盖的最新日期（YYYY-MM-DD；无数据为空串）—— 增量同步用
+   * @returns 最新日期
+   */
+  latestMarginDate: () => Promise<string>;
+  /**
    * 落库季度行（按 (code, period_end) upsert）
    * @param rows 季度行
    */
@@ -228,6 +253,18 @@ const hydrateShare = (row: PluginDbRow<Record<string, unknown>>): EtfShareRow =>
 });
 
 /**
+ * 库里的两融行还原成展示行
+ * @param row 库里的一行
+ * @returns 两融行
+ */
+const hydrateMargin = (row: PluginDbRow<Record<string, unknown>>): EtfMarginRow => ({
+  date: text(row, 'date'),
+  code: text(row, 'code'),
+  balanceYi: num(row, 'balance_yi'),
+  netBuyYi: num(row, 'net_buy_yi'),
+});
+
+/**
  * 库里的季度行还原成展示行
  * @param row 库里的一行
  * @returns 季度行
@@ -286,6 +323,7 @@ const EMPTY_META: BroadMeta = {
   shareSyncedAt: null,
   shareEarliestDate: '',
   shareLatestDate: '',
+  marginSyncedAt: null,
 };
 
 /**
@@ -296,6 +334,7 @@ const EMPTY_META: BroadMeta = {
 export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> => {
   await db.ensureTable(BROAD_DAILY_TABLE, BROAD_DAILY_COLUMNS);
   await db.ensureTable(BROAD_SHARE_TABLE, BROAD_SHARE_COLUMNS);
+  await db.ensureTable(BROAD_MARGIN_TABLE, BROAD_MARGIN_COLUMNS);
   await db.ensureTable(BROAD_QUARTER_TABLE, BROAD_QUARTER_COLUMNS);
   await db.ensureTable(BROAD_HOLDERS_TABLE, BROAD_HOLDERS_COLUMNS);
   await db.ensureTable(BROAD_ANCHOR_TABLE, BROAD_ANCHOR_COLUMNS);
@@ -303,6 +342,7 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
 
   const dailyByCode = ref<Map<string, EtfDailyRow[]>>(new Map());
   const sharesByCode = ref<Map<string, EtfShareRow[]>>(new Map());
+  const marginByCode = ref<Map<string, EtfMarginRow[]>>(new Map());
   const quartersByCode = ref<Map<string, EtfQuarterRow[]>>(new Map());
   const holdersByCode = ref<Map<string, EtfHolderRow[]>>(new Map());
   const anchors = ref<AnchorHolding[]>([]);
@@ -331,6 +371,17 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
     else shareMap.set(row.code, [row]);
   }
   sharesByCode.value = shareMap;
+
+  const storedMargins = await db.select<Record<string, unknown>>(BROAD_MARGIN_TABLE, {
+    orderBy: { column: 'date' },
+  });
+  const marginMap = new Map<string, EtfMarginRow[]>();
+  for (const row of storedMargins.map(hydrateMargin)) {
+    const bucket = marginMap.get(row.code);
+    if (bucket) bucket.push(row);
+    else marginMap.set(row.code, [row]);
+  }
+  marginByCode.value = marginMap;
 
   const storedQuarter = await db.select<Record<string, unknown>>(BROAD_QUARTER_TABLE, {
     orderBy: { column: 'period_end' },
@@ -388,6 +439,7 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
       dailyDates: [...dates].sort(),
       sharesByCode: sharesByCode.value,
       shareDates: [...shareDates].sort(),
+      marginByCode: marginByCode.value,
       quartersByCode: quartersByCode.value,
       holdersByCode: holdersByCode.value,
       anchors: anchors.value,
@@ -483,6 +535,55 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
       if (value) dates.add(value);
     }
     return [...dates].sort();
+  };
+
+  /**
+   * 两融行 upsert（同 (date, code) 已存在则更新）
+   * @param rows 两融行
+   */
+  const saveMarginRows = async (rows: readonly EtfMarginRow[]): Promise<void> => {
+    if (rows.length === 0) return;
+    const map = new Map(marginByCode.value);
+    for (const row of rows) {
+      const existing = await db.select<Record<string, unknown>>(BROAD_MARGIN_TABLE, {
+        where: { date: row.date, code: row.code },
+      });
+      const record: Record<string, unknown> = {
+        date: row.date,
+        code: row.code,
+        balance_yi: row.balanceYi,
+        net_buy_yi: row.netBuyYi,
+      };
+      if (existing.length > 0) {
+        await db.update(BROAD_MARGIN_TABLE, existing[0].id, record);
+      } else {
+        await db.insert(BROAD_MARGIN_TABLE, record);
+      }
+      // 内存 map 同步（替换该 code 的该日期行）
+      const bucket = map.get(row.code) ?? [];
+      const index = bucket.findIndex((item) => item.date === row.date);
+      if (index >= 0) bucket[index] = row;
+      else bucket.push(row);
+      bucket.sort((left, right) => (left.date < right.date ? -1 : 1));
+      map.set(row.code, bucket);
+    }
+    marginByCode.value = map;
+  };
+
+  /**
+   * 读两融余额已覆盖的最新日期（增量同步用）
+   * @returns 最新日期；无数据为空串
+   */
+  const latestMarginDate = async (): Promise<string> => {
+    const stored = await db.select<Record<string, unknown>>(BROAD_MARGIN_TABLE, {
+      orderBy: { column: 'date' },
+    });
+    let latest = '';
+    for (const row of stored) {
+      const value = text(row, 'date');
+      if (value > latest) latest = value;
+    }
+    return latest;
   };
 
   /**
@@ -582,6 +683,8 @@ export const createBroadRepo = async (db: PluginDatabase): Promise<BroadRepo> =>
     saveDailyRows,
     saveShareRows,
     existingShareDates,
+    saveMarginRows,
+    latestMarginDate,
     saveQuarterRows,
     saveHolderRows,
     saveAnchors,

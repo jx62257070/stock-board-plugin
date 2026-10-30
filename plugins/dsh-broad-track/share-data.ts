@@ -19,6 +19,14 @@
  * ⚠️ 宿主能力（网络请求与限速节拍）以 `deps` 形式注入，本模块不 import 宿主模块。
  */
 import {
+  EM_RZRQ_CODE_TOKEN,
+  EM_RZRQ_LIMIT_TOKEN,
+  EM_RZRQ_MAX_PAGES,
+  EM_RZRQ_PAGE_SIZE,
+  EM_RZRQ_QUERY,
+  EM_RZRQ_REFERER,
+  EM_RZRQ_START_TOKEN,
+  EM_RZRQ_URL,
   EXCHANGE_DELAY_MS,
   EXCHANGE_FETCH_ATTEMPTS,
   EXCHANGE_RETRY_DELAY_MS,
@@ -40,11 +48,12 @@ import {
   TENCENT_KLINE_URL,
 } from './constants';
 import {
+  parseMarginHistory,
   parseSseShareSnapshot,
   parseSzseShareHistory,
   parseTencentKline,
 } from './share-parse';
-import type { SseShareRow, SzseShareRow, TencentKlineRow } from './share-parse';
+import type { MarginRow, SseShareRow, SzseShareRow, TencentKlineRow } from './share-parse';
 import type { BroadDeps } from './types';
 
 /**
@@ -208,6 +217,42 @@ export const fetchTencentKline = async (
     .replace(TENCENT_KLINE_COUNT_TOKEN, String(count));
   const text = await fetchTextWithRetry(deps, url, TENCENT_KLINE_REFERER);
   return parseTencentKline(text, symbol);
+};
+
+/**
+ * 取单只 ETF 的两融余额历史（东财数据中心，按代码 + 起始日过滤）
+ *
+ * `datacenter-web` 域不在交易所限速名单里，但保持与份额同步一致的小步间隔。
+ * ⚠️ 上游单页实测上限 500 行（传更大值也只回 500），这里自动翻页直到
+ * 末页（返回不足一整页）—— 全量回填 2024 年以来约 2 页即够。
+ * `result` 为 null（该代码无记录）返回空数组 —— 不算失败。
+ * @param deps 宿主能力
+ * @param code 6 位裸代码
+ * @param start 起始日（YYYY-MM-DD，含当日）
+ * @returns 两融行（日期降序，与上游一致）
+ */
+export const fetchMarginHistory = async (
+  deps: BroadDeps,
+  code: string,
+  start: string,
+): Promise<MarginRow[]> => {
+  const rows: MarginRow[] = [];
+  for (let page = 1; page <= EM_RZRQ_MAX_PAGES; page += 1) {
+    const url = EM_RZRQ_URL + '?' + EM_RZRQ_QUERY
+      .replace(EM_RZRQ_CODE_TOKEN, code)
+      .replace(EM_RZRQ_START_TOKEN, start)
+      .replace(EM_RZRQ_LIMIT_TOKEN, String(EM_RZRQ_PAGE_SIZE))
+      // 翻页：EM_RZRQ_QUERY 固定 pageNumber=1，这里在页码占位上替换
+      .replace('pageNumber=1', `pageNumber=${page}`);
+    const pageRows = parseMarginHistory(
+      await fetchTextWithRetry(deps, url, EM_RZRQ_REFERER),
+      code,
+    );
+    rows.push(...pageRows);
+    if (pageRows.length < EM_RZRQ_PAGE_SIZE) break; // 末页
+    await deps.format.delay(EXCHANGE_DELAY_MS);
+  }
+  return rows;
 };
 
 /**
