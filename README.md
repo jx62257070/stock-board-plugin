@@ -28,6 +28,7 @@ WHF 股票看板本身只保留插件内核与开放能力（贡献点、`ctx.*`
 | `dsh-stock-screener` | 选股器 | 基础筛选（条件筛选 + MA 金叉回测）、信号扫描（股票池 × 八种技术信号）、尾盘选股（分时强度精筛）；自宿主 v3.3.0 起由内置页迁移为插件 | [说明](./plugins/dsh-stock-screener/README.md) |
 | `csw-active-cap-index` | 活跃市值与指数贡献 | 一页两段式市场结构看板：活跃市值对齐指南针 0AMV 口径（活跃股流通市值合计 + 逐日趋势曲线 + 5 日均线），指数贡献对齐通达信口径（拉 / 拖指数正负两榜 + 与指数实际涨跌对账） | [说明](./plugins/csw-active-cap-index/README.md) |
 | `dsh-history-review` | 历史牛熊复盘 | 2000 年以来七轮牛市 / 七轮大级别熊市的标准化档案复盘（阶段 / 事件 / 错配画像，数字由月 K 回算）+ 模式库横向对比；自宿主 v4.28.0 起由行情全景「历史复盘」页签迁移为插件 | [说明](./plugins/dsh-history-review/README.md) |
+| `dsh-sentiment-index` | 散户情绪指数 | 题材热度 + 散户情绪双指数看板（0~100，按近 250 日分位归一），价格-情绪-量能同图对照与背离标记；混合源架构（同花顺主源 + 东财散户因子），东财限流不中断采集；声明支持 PC / 移动端 | [说明](./plugins/dsh-sentiment-index/README.md) |
 
 ## 安装方式
 
