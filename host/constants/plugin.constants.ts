@@ -214,6 +214,34 @@ export const PLUGIN_ORIGIN = {
   USER: 'user',
 } as const;
 
+/**
+ * 插件支持端的合法取值（`devices` 声明字段的白名单）
+ *
+ * `pc` = 桌面（浏览器 / Tauri PC）；`mobile` = 移动端（Android WebView）。
+ * 声明语义是「作者已在窄屏验证过可用」，宿主只按声明放行，不替作者兜底观感。
+ */
+export const PLUGIN_DEVICES = ['pc', 'mobile'] as const;
+
+/** 插件支持端 */
+export type PluginDevice = (typeof PLUGIN_DEVICES)[number];
+
+/**
+ * 缺省支持端：仅 PC
+ *
+ * 存量插件与历史安装记录都不声明 `devices`，按「仅 PC」处理 ——
+ * 行为零变化，且移动端装配层直接不挂载它们（不产生幽灵条目）。
+ */
+export const PLUGIN_DEVICE_DEFAULT: readonly PluginDevice[] = ['pc'];
+
+/** 支持端 → 中文文案（市场卡片 / 管理弹窗的支持端徽标） */
+export const PLUGIN_DEVICE_LABEL: Record<PluginDevice, string> = {
+  pc: 'PC',
+  mobile: '移动端',
+};
+
+/** 「声明支持移动端」的徽标文案（市场卡片与插件清单的 devices 含 mobile 时展示） */
+export const PLUGIN_MOBILE_READY_BADGE = '移动端可用';
+
 /** 用户插件代码体积上限（localStorage 单命名空间别挤爆，512KB 足够一个面板插件） */
 export const USER_PLUGIN_CODE_MAX_LENGTH = 512 * 1024;
 

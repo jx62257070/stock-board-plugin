@@ -30,6 +30,7 @@ import type {
   MarketTurnoverSnapshot,
 } from './market-data.types.ts';
 import type { HEADER_MARQUEE_TONE, PLUGIN_ORIGIN, PLUGIN_STATUS } from '../constants/plugin.constants.ts';
+import type { PluginDevice } from '../constants/plugin.constants.ts';
 import type { AgentAskSource } from '../constants/agent-ask.constants.ts';
 
 /** 可逆副作用句柄：调用 `dispose()` 撤销一次注册（幂等） */
@@ -202,6 +203,13 @@ export interface VanishedRouteInfo {
 
 /** 插件路由桥的可选宿主策略 */
 export interface PluginRouteBridgeOptions {
+  /**
+   * `underLayout` 插件路由要挂到的父布局路由 name
+   *
+   * 缺省 = 挂到 PC 主布局（`LAYOUT_ROUTE_NAME`）之下；移动端没有主布局路由，
+   * 传 `null` 让 `underLayout` 路由直接注册为顶层路由。
+   */
+  layoutRouteName?: string | null;
   /**
    * 当前停留的插件页随插件撤销时的收尾（跳去哪 + 要不要提示用户）
    *
@@ -1367,6 +1375,12 @@ export interface UserPluginRecord {
   description: string;
   /** 作者（定义里没写时空串，展示层补「用户安装」） */
   author: string;
+  /**
+   * 支持端快照（可选，历史记录没有此字段按仅 PC 处理）
+   *
+   * 安装 / 升级时从定义冗余一份：移动端装配层据此过滤，不必先执行代码。
+   */
+  devices?: readonly PluginDevice[];
   /** 插件代码原文（预构建 ESM JS，`export default { …PluginDefinition }`） */
   code: string;
   /** 安装时间（ISO 8601） */
@@ -1398,6 +1412,8 @@ export interface PluginRuntimeInfo {
   description: string;
   /** 作者 */
   author: string;
+  /** 支持端（定义缺省时归一化为仅 PC） */
+  devices: readonly PluginDevice[];
   /** 是否内置插件（随应用分发，不可删除） */
   builtin: boolean;
   /** 插件来源 */
@@ -1540,6 +1556,13 @@ export interface PluginDefinition {
    * 任一未就绪则本插件停在「等待依赖」状态，提供方挂载 / provide 后自动续挂
    */
   inject?: readonly string[];
+  /**
+   * 支持端声明（缺省视为仅 PC）
+   *
+   * 声明含 `mobile` 表示作者已在窄屏验证过：宿主才会在移动端装配层挂载本插件；
+   * 未声明（或仅 `pc`）的插件在移动端**彻底不存在**（不挂载、不显示、不报错）。
+   */
+  devices?: readonly PluginDevice[];
   /** 插件配置（等价 dsh 的配置层：不改源码即可换实现 / 调参数） */
   config?: PluginConfig;
   /**

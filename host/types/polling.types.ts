@@ -1,4 +1,13 @@
 /**
+ * 轮询所属市场（决定轮询窗口）
+ *
+ * - `A`：A 股交易日 09:15-15:00
+ * - `US`：美股 21:30-24:00 与 00:00-04:00
+ * - `HK`：港股周一~五 09:30-16:00
+ */
+export type PollingMarket = 'A' | 'US' | 'HK';
+
+/**
  * 轮询选项
  */
 export interface PollingOptions {
@@ -12,8 +21,14 @@ export interface PollingOptions {
   intervalMs: number;
   /** 是否启用交易窗口治理：仅在所属市场轮询窗口内轮询，窗口外只请求一次 */
   tradingAware?: boolean;
-  /** 所属市场（决定轮询窗口）：A 股 09:15-15:00；美股 21:30-24:00 与 00:00-04:00；默认 A */
-  market?: 'A' | 'US';
+  /**
+   * 所属市场（决定轮询窗口），默认 A
+   *
+   * 传 getter 可在「组件实例跨标的复用」场景下随符号响应式切换
+   * （如详情面板在 A 股 / 港股标的间切换）：调度器在窗口 computed 内调用，
+   * getter 内读取的响应式依赖会被自动追踪
+   */
+  market?: PollingMarket | (() => PollingMarket);
   /** 启动时是否立即执行一次任务 */
   immediate?: boolean;
 }

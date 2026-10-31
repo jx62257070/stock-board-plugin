@@ -48,9 +48,6 @@ export const STORAGE_NS_MARKET_RANK_SECTOR_VIEW = 'marketRank.sectorView';
 /** 插件系统命名空间（禁用黑名单 + 侧栏面板折叠态） */
 export const STORAGE_NS_PLUGIN = 'plugin';
 
-/** 行情全景 · 历史复盘命名空间（指数月K快照 + 同步水位；约百余 KB 量级） */
-export const STORAGE_NS_PANORAMA_REVIEW = 'panorama.review';
-
 /** 行情全景 · 行业龙头分组自定义排序（JSON：{ board: string[], segment: string[] }，存分组名顺序） */
 export const STORAGE_NS_PANORAMA_LEADERS_ORDER = 'panorama.leaders.order';
 
@@ -95,12 +92,9 @@ export const STORAGE_NS_MOBILE_BULL_REVIEW = 'mobile.bullReview';
 export const STORAGE_NS_MOBILE_FUND_FLOW_CURVE = 'mobile.fundFlowCurve';
 
 /** 移动端 · 首页金刚区入口设置（顺序 + 显隐，JSON：{ order, hidden }；
- *  长按任意金刚区 tile 打开设置弹窗，key 为入口路由路径（to）） */
+ *  长按任意金刚区 tile 打开设置弹窗，key 为入口路由路径（to）；
+ *  2026-10-30 起行情页并入首页（P4），原独立键 mobile.quoteKingSettings 废弃） */
 export const STORAGE_NS_MOBILE_KING_SETTINGS = 'mobile.kingSettings';
-
-/** 移动端 · 行情页金刚区入口设置（顺序 + 显隐，JSON：{ order, hidden }，结构与首页 kingSettings 相同；
- *  行情页入口集合与首页不相交，独立持久化避免两页设置互相污染（2026-10-20 新增） */
-export const STORAGE_NS_MOBILE_QUOTE_KING_SETTINGS = 'mobile.quoteKingSettings';
 
 /** 移动端 · 调试模式开关（'1'/'0'；「我的」页应用信息卡连点 10 次切换） */
 export const STORAGE_NS_MOBILE_DEBUG = 'mobile.debug';

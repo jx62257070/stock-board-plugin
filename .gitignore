@@ -19,3 +19,9 @@ plugins-dist/*.zip
 
 # 工作区数据（会话记忆等，勿入库）
 .workbuddy/
+.zcode
+.trae
+.claude
+.codex
+.chatgpt
+.codegraph

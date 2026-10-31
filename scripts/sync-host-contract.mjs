@@ -182,13 +182,16 @@ const main = () => {
   const files = collectClosure(hostSrc, seeds);
 
   // 先清掉旧快照里不再属于闭包的文件，避免留下幽灵引用（比较按映射后的落位）
+  // 豁免清单：非闭包成员但要常驻的支撑文件（persistedstate-shim.d.ts 的 side-effect
+  // import 负责 pinia persist 选项的类型扩展，见该文件头注释）
+  const PRUNE_EXEMPT = new Set(['persistedstate-shim.d.ts']);
   const previous = [];
   if (fs.existsSync(HOST_DIR)) {
     const walk = (dir, prefix) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
         if (entry.isDirectory()) walk(path.join(dir, entry.name), rel);
-        else if (rel !== 'README.md') previous.push(rel);
+        else if (rel !== 'README.md' && !PRUNE_EXEMPT.has(rel)) previous.push(rel);
       }
     };
     walk(HOST_DIR, '');

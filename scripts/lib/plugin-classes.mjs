@@ -22,8 +22,8 @@ import path from 'node:path';
  */
 export const CLASS_ALLOWLIST_RELATIVE = path.join('src', 'common', 'assets', 'styles', 'plugin-classes.txt');
 
-/** 长得像 Tailwind 工具类的 token（含 `sm:` / `min-[900px]:` / `@3xl:` 变体前缀与 `[11px]` 任意值） */
-const CLASS_LIKE = /^(?:[a-z@][a-z0-9-]*(?:\[[^\]]+\])?:)*[a-z][a-z0-9/.-]*(?:\[[^\]]+\])?$/;
+/** 长得像 Tailwind 工具类的 token（含 `sm:` / `min-[900px]:` / `@3xl:` 变体前缀与 `[11px]` 任意值；主体允许 `@` 开头 —— Tailwind 4 的 `@container` 容器声明类） */
+const CLASS_LIKE = /^(?:[a-z@][a-z0-9-]*(?:\[[^\]]+\])?:)*[a-z@][a-z0-9/.-]*(?:\[[^\]]+\])?$/;
 
 /**
  * 转义成 CSS 选择器里那样的类名（`text-[10px]` → `text-\[10px\]`）
@@ -52,13 +52,16 @@ export const readHostCssClassProbe = (hostRoot) => {
 
 /**
  * 是不是该收进清单：必须是类名字面量，且排掉上面说的那种被误捞出来的单词
+ *
+ * `@` 前缀的 token 无条件放行 —— 那是 Tailwind 4 容器查询家族
+ * （`@container` / `@sm:` 等），单词形态但绝不可能是一般标识符。
  * @param token 候选 token
  * @param isKnownClass 该类是否已存在于宿主 CSS
  * @returns 是否保留
  */
 const keepToken = (token, isKnownClass) =>
   token.length > 1 && CLASS_LIKE.test(token)
-  && (isKnownClass(token) || /[-:[]/.test(token));
+  && (token.startsWith('@') || isKnownClass(token) || /[-:[]/.test(token));
 
 /**
  * 从插件产物源码里抽出所有类名
@@ -88,6 +91,17 @@ export const collectArtifactClasses = (code, isKnownClass = () => false) => {
   // 2. :class 的数组 / 对象 / 三元表达式：取到行尾再抽里面的字符串
   for (const match of source.matchAll(/\bclass\s*:\s*([^\n]*)/g)) {
     for (const inner of match[1].matchAll(/(['"`])([\s\S]*?)\1/g)) absorb(inner[2]);
+  }
+  // 3. 全文扫「@ 开头或含 / 的类形 token」（兜底 1/2 的盲区）
+  //    动态绑定的结果类常被赋给自定义属性（如 fillClass: isPast ? "bg-primary" : … "bg-primary/70"），
+  //    不在 class: 前缀行上，1/2 都捞不到。这类类形极窄（@ 容器家族 / 变体透明度、任意值），
+  //    全文扫描会捎带少量形似的非类 token（如 URL 路径段 api/qt/clist）——
+  //    Tailwind 对不认识的候选不生成 CSS，白名单多几行噪音无害；漏真类才是事故。
+  for (const match of source.matchAll(/[A-Za-z@][A-Za-z0-9/.[@\]-]*/g)) {
+    const token = match[0];
+    if ((token.startsWith('@') || token.includes('/')) && keepToken(token, isKnownClass)) {
+      classes.add(token);
+    }
   }
   return classes;
 };
