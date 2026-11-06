@@ -8,7 +8,8 @@
  *
  * 覆盖（混合源架构 1.1.0，全部离线断言，不联网）：
  * 1. THS 解析层：清单锚点 / 快照行（GBK HTML fixture）/ 年 K JSONP（含罗马后缀与脏行）；
- * 2. EM 解析层：fflow 字段序（小单在下标 2 / 7）、BK 清单解析、THS→BK 名称映射
+ * 2. EM 解析层：fflow 字段序（小单在下标 2 / 7）、BK 清单解析、四档资金快照解析
+ *    （f62/f184/f84/f87 映射与 "-" 归 null）、THS→BK 名称映射
  *    （等值 / 罗马后缀 / 别名表 / 不猜前缀）、池子 total；
  * 3. judge 指标层：分位窗口、缺席因子权重重分配、背离两条、滞后天数与成交额变化；
  * 4. scan 合并层：日 K 覆盖价量额并补涨跌幅、fflow 不开新行、未落定日不合并、
@@ -152,6 +153,30 @@ assert(emMap['881169'] === undefined, '映射：东财无同义板块时不猜�
 
 assert(emData.parsePoolTotal('{"data":{"total":31}}') === 31, 'pool：应取 data.total');
 assert(emData.parsePoolTotal('not-json') === null, 'pool：坏 JSON 应返回 null');
+
+// 四档资金快照解析：f62 主力净额 / f184 主力净占比 / f84 小单净额 / f87 小单净占比；"-" 归 null
+const fundPayload = JSON.stringify({
+  data: {
+    diff: [
+      { f12: 'BK1036', f14: '半导体', f62: 3.0e9, f184: 6.23, f84: -1.5e9, f87: -3.11 },
+      { f12: 'BK0473', f14: '证券', f62: '-', f184: '-', f84: '-', f87: '-' },
+      { f12: '880000', f14: '非板块行', f62: 1, f184: 1, f84: 1, f87: 1 },
+      { f12: 'BK1036', f14: '半导体', f62: 9, f184: 9, f84: 9, f87: 9 },
+    ],
+  },
+});
+const fundRows = emData.parseClistFundJson(fundPayload);
+assert(fundRows.length === 2, `四档快照：应过滤非 BK 行并去重得 2 行（实际 ${fundRows.length}）`);
+assert(
+  fundRows[0]?.mainNet === 3.0e9 && fundRows[0]?.mainRatio === 6.23
+    && fundRows[0]?.smallNet === -1.5e9 && fundRows[0]?.smallRatio === -3.11,
+  '四档快照：f62/f184/f84/f87 应映射到主力与小单的净额与净占比',
+);
+assert(
+  fundRows[1]?.mainNet === null && fundRows[1]?.smallRatio === null,
+  '四档快照："-" 应归 null（绝不当 0）',
+);
+assert(emData.parseClistFundJson('not-json').length === 0, '四档快照：坏 JSON 应返回空数组');
 
 // ---------- 3) 指标层 ----------
 

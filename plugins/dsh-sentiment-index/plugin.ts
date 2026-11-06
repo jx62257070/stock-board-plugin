@@ -11,7 +11,8 @@
  * - 占比分子分母同源（板块成交额与沪深两市成交额都取东财指数日 K）；
  * - 因子先归一化为近 250 日历史分位再加权，权重进常量并标「试验性」；
  * - 交易日 15:30 前的半日 bar 不入库（防永久污染分位序列）；
- * - 打开页面不联网，只读 ctx.db；「采集更新」用户点击触发，并发 ≤3 + 500ms 错峰。
+ * - 打开页面不联网，只读 ctx.db；「采集更新」用户点击触发；同花顺并发 ≤3 + 500ms 错峰，
+ *   东财 fflow 串行慢车道（探测 + 1.2s 间隔 + 连拒熔断，对齐上游实测频率红线）。
  *
  * 数据落地：`ctx.db` 三张插件表（board_history / index_daily / scan_meta）。
  * 数据源：同花顺主源（板块清单 / 年K / 当日快照，≈500 日深度）+ 东财 fflow 小单拆分
@@ -34,13 +35,16 @@ import type { PluginDefinition } from '../../host/types/plugin.types';
 export const sentimentPlugin: PluginDefinition = {
   id: SENTIMENT_PLUGIN_ID,
   name: SENTIMENT_MENU_TITLE,
-  version: '1.1.0',
+  version: '1.3.1',
   description:
     '题材热度 + 散户情绪双指数看板：板块成交额占全市场比重为热度锚点，东财小单资金拆分做散户提纯，'
     + '输出 0~100 双指数；价格-情绪-量能同图对照，背离标记一眼可见。打开页面不联网，采集更新用户点击触发。',
   author: '内置',
   // 2026-10-30 王总指定：PC + 移动端双端可用（组件按容器断点自适应三档形态）
   // 1.1.0 混合源改造：同花顺主源（清单/日K/快照）+ 东财仅 fflow 小单与池子
+  // 1.2.0 fflow 串行慢车道：前置探测 + 1.2s 间隔 + 连拒熔断（对齐东财实测频率红线）
+  // 1.3.0 东财 JSONP 桥（宿主 4.32.0 注入）+ clist 四档快照自积累：绕开 WAF 指纹封杀
+  // 1.3.1 桥 iframe 换 quote.eastmoney.com（404 空响应在 WebView2 是错误页、init script 不执行）+ 就绪失败可诊断日志
   devices: ['pc', 'mobile'],
   apply: async (ctx) => {
     // 宿主能力一次性取齐后沿调用链注入 —— 单文件产物形态下没有 import 可用，

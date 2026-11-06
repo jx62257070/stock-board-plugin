@@ -10,7 +10,10 @@
  *   分母走宿主 fetchMarketTurnover（腾讯，与 THS 分子量级一致：板块合计 ≈ 两市 98.5%），
  *   东财指数日 K 为次选降级。东财封禁时散户因子当日缺席（权重自动重分配），不 block 采集；
  * - 「散户」= 东财小单估算口径（fflow daykline f58 小单净占比），UI 固定标注；
- * - 频率红线：并发 ≤ 3 + 每请求 500ms 错峰（东财 push2his / 同花顺 d.10jqka 都有前科）；
+ * - 频率红线（2026-10-31 按上游实测收紧）：同花顺与清单类并发 ≤ 3 + 每请求 500ms 错峰；
+ *   东财 fflow 走**串行慢车道**（1.2s 间隔 + 探测 + 连拒熔断，见 EM_FFLOW_* 常量）——
+ *   dsh-mainline 实测东财行情域「间隔 ≥1s 正常、短时连发立刻拒连（停顿约 20s 恢复）」，
+ *   3 并发连发只会自我触发/延长封禁窗口；
  * - 打开页面不联网，只读 ctx.db；采集更新为用户点击触发，不轮询。
  */
 
@@ -72,6 +75,14 @@ export const THS_REFERER = 'https://q.10jqka.com.cn/';
 // ---------- 东财（fflow 小单拆分 + 池子 + 分母降级 + BK 映射） ----------
 
 /**
+ * 东财网页端公共 ut token（akshare 同款，非用户级凭证）
+ *
+ * 2026-10-31 实测：浏览器上下文（WebView 指纹 + 东财 Referer）下带 ut 的
+ * fflow / clist JSONP 请求畅通；未单独实测无 ut 形态，统一带上最稳。
+ */
+export const EM_UT_TOKEN = 'b2884a393a59ad64002292a3e90d46a5';
+
+/**
  * 东财板块清单（映射用：THS→BK 名称对齐的前提；`{pz}` 条数、`{fs}` 板块类型由调用方替换）
  *
  * ⚠️ 只用于建立 THS→BK 名称映射（fflow 的前提），不是板块清单来源（板块全集走 THS）。
@@ -86,11 +97,11 @@ export const EM_FS_INDUSTRY = 'm:90+t:2';
 /** 东财概念板块 fs 参数 */
 export const EM_FS_CONCEPT = 'm:90+t:3';
 
-/** 清单单页条数（一页可收全，与 total 对账的护栏翻页） */
-export const EM_CLIST_PAGE_SIZE = 1000;
+/** 清单单页条数（⚠️ 2026-11-01 实测：JSONP 通道服务端把 pz 截断到 100 行/页，reqwest 时代一页 496 的行为已变） */
+export const EM_CLIST_PAGE_SIZE = 100;
 
-/** 清单最多翻页数（护栏） */
-export const EM_CLIST_MAX_PAGES = 5;
+/** 清单最多翻页数（护栏；100/页 × 8 = 800 ≥ 全部板块 496，留足余量） */
+export const EM_CLIST_MAX_PAGES = 8;
 
 /**
  * 东财板块 / 指数日 K（分母的**次选**：主分母为宿主 fetchMarketTurnover 腾讯源；
@@ -98,7 +109,8 @@ export const EM_CLIST_MAX_PAGES = 5;
  */
 export const EM_KLINE_URL_TEMPLATE =
   'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}'
-  + '&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&beg={beg}&end=20500101';
+  + '&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&beg={beg}&end=20500101'
+  + `&ut=${EM_UT_TOKEN}`;
 
 /**
  * 同花顺板块名 → 东财板块名（THS→BK 名称映射的别名表）
@@ -125,7 +137,27 @@ export const EM_THS_TO_EM_ALIAS: Readonly<Record<string, string>> = {
 /** 东财板块逐日资金拆分（fflow daykline；fields2 扩到 f61 = 五档净额 + 五档净占比） */
 export const EM_FFLOW_URL_TEMPLATE =
   'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?secid={secid}'
-  + '&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&lmt=0';
+  + '&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&lmt=0'
+  + `&ut=${EM_UT_TOKEN}`;
+
+/**
+ * 东财板块清单四档资金流快照（**自积累主通道**，2026-10-31 新增）
+ *
+ * 与 fflow 历史接口不同源不同路径：一次请求返回**全部板块**的当日
+ * 主力/小单净额与净占比（四档里的两档即可喂散户因子），每天 1~2 个请求
+ * 落库自建历史 —— 从此即便 push2his fflow 历史接口持续被封，散户因子也能
+ * 逐日累积（代价：无 121 日回补，分位窗口从安装日起算）。
+ */
+export const EM_CLIST_FUND_URL_TEMPLATE =
+  'https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz={pz}&po=1&np=1&fltt=2&invt=2'
+  + '&fid=f12&fs={fs}&fields=f12,f14,f62,f184,f84,f87'
+  + `&ut=${EM_UT_TOKEN}`;
+
+/** 四档快照单页条数（服务端 pz 截断到 100/页，同 EM_CLIST_PAGE_SIZE） */
+export const EM_CLIST_FUND_PAGE_SIZE = 100;
+
+/** 四档快照最多翻页数（护栏，100/页 × 8 覆盖全部板块） */
+export const EM_CLIST_FUND_MAX_PAGES = 8;
 
 /** 东财涨停 / 炸板 / 跌停池基址（`{path}` 注入池子端点，`{date}` 注入 YYYYMMDD） */
 export const EM_POOL_URL_TEMPLATE =
@@ -144,6 +176,59 @@ export const EM_MARKET_SECIDS = ['1.000001', '0.399001'] as const;
 /** 东财要求带 Referer，否则可能被拒 */
 export const EM_REFERER = 'https://quote.eastmoney.com/';
 
+// ---------- 东财 JSONP 桥（2026-10-31，宿主 4.32.0 注入） ----------
+
+/**
+ * 东财行情域被 WAF 按「浏览器 TLS 指纹 + 东财域 Referer」双条件封杀（reqwest /
+ * curl / undici 指纹一律连接层拒连），`app:http` 通道打 push2 系 API 全灭；而
+ * WebView 内、以 eastmoney.com 页面为 Referer 的 JSONP 畅通。宿主向东财域注入
+ * 桥脚本（`EM_JSONP_BRIDGE_INIT_SCRIPT`，协议见宿主 PLUGIN_API.md §5.5.1），本
+ * 插件以隐藏 iframe 承载东财页面、postMessage 代发 JSONP —— 解析层拿到的文本
+ * 与 http 通道同构，parse 函数零改动。
+ *
+ * 信源常量与宿主 `src-tauri/src/lib.rs` 严格同步（**两端**，任一改动必须同步）；
+ * 桥缺席（旧宿主 / 纯浏览器 dev / 移动端未注入）→ 回退 app:http 原通道。
+ */
+
+/** 桥信源常量（宿主 lib.rs 的 BRIDGE_SOURCE 必须与此一致） */
+export const EM_BRIDGE_SOURCE = 'whf-stock-board-em-bridge';
+
+/**
+ * 桥 iframe 加载的东财页面（必须是**真实渲染的 HTML 文档**）
+ *
+ * ⚠️ 2026-10-31 真机 E2E 实测：不能用 `https://push2his.eastmoney.com/`（404 空响应
+ * text/plain 0 字节在 WebView2 里渲染为错误页，`initialization_script_for_all_frames`
+ * 的脚本不会在错误页上执行 → 桥永远等不到 ready → 静默回退 http 被拒连）。
+ * 选 quote.eastmoney.com：完整 HTML 文档 + 最早探针验证过的 JSONP Referer 上下文；
+ * init script 在 document 创建时即执行，ready 几乎即时（不等页面资源加载完）。
+ */
+export const EM_BRIDGE_IFRAME_URL = 'https://quote.eastmoney.com/';
+
+/** 桥 iframe 无障碍标题 */
+export const EM_BRIDGE_IFRAME_TITLE = '东财数据桥（隐藏）';
+
+/** 桥就绪等待超时（毫秒；超时视为宿主未注入，回退 app:http） */
+export const EM_BRIDGE_READY_TIMEOUT_MS = 10000;
+
+/** 桥内单次 JSONP 超时（毫秒；与宿主桥脚本内的超时一致，双保险） */
+export const EM_JSONP_TIMEOUT_MS = 15000;
+
+/**
+ * 桥空闲自动拆除（毫秒）
+ *
+ * 桥用完不挂常驻 iframe（东财页面留在文档里会一直持有连接与内存）：自最后一次
+ * 桥活动起空闲该时长即自动拆除；期间的桥请求（THS 段之后回到桥时）会自动重建，
+ * 重建失败回退 app:http —— 比 runScan 显式 dispose 更稳（并发扫描互不拆台）。
+ */
+export const EM_BRIDGE_IDLE_MS = 120000;
+
+/** 走桥的东财行情域（push2ex 池子未被风控波及，继续走 app:http 不引入桥依赖） */
+export const EM_BRIDGE_ROUTE_HOSTS: readonly string[] = [
+  'push2his.eastmoney.com',
+  'push2.eastmoney.com',
+  'push2delay.eastmoney.com',
+];
+
 // ---------- 请求与节流 ----------
 
 /** 同一上游 URL 的原地重试次数（含首次；东财掐连接呈瞬时簇，稍等自愈） */
@@ -157,6 +242,32 @@ export const SCAN_DELAY_MS = 500;
 
 /** 失败补采轮之前的等待与轮内间隔（毫秒；给限速留恢复时间） */
 export const SCAN_RETRY_DELAY_MS = 2000;
+
+/**
+ * 东财 fflow 串行慢车道的相邻请求间隔（毫秒）
+ *
+ * dsh-mainline 实测（2026-09-18）：东财行情域是**突发限速** —— 间隔 ≥1s 正常返回、
+ * 短时连发立刻拒连（TCP RST）、停顿约 20s 恢复。fflow 全量拉取本就是采集大头，
+ * 串行 1.2s 对 30 板块 ≈ 36s，换「整轮能拿到数据」值得；并发 3 × 500ms 的旧节奏
+ * 已实测触发整轮 0/20 全拒。
+ */
+export const EM_FFLOW_SCAN_DELAY_MS = 1200;
+
+/**
+ * fflow 车道内首次「连接被拒」后的恢复等待（毫秒）
+ *
+ * dsh-mainline 实测封禁窗口约 20s 自愈：首拒后停这一拍再继续，窗口刚开时
+ * 剩余板块还能救回来；连续再拒说明窗口仍开着，交给熔断（EM_FFLOW_BLOCK_ABORT_RUNS）。
+ */
+export const EM_FFLOW_BLOCK_COOLDOWN_MS = 20000;
+
+/**
+ * fflow 车道的连拒熔断阈值（连续「连接被拒」次数，含冷却后再拒的那次）
+ *
+ * 对封禁中的上游连发只会延长封禁（em-data.ts 头注释同源结论）：达到该次数立即
+ * 跳过剩余板块，本轮散户因子整体缺席，等下次采集（恢复后自动补历史）。
+ */
+export const EM_FFLOW_BLOCK_ABORT_RUNS = 2;
 
 // ---------- 历史与口径 ----------
 
@@ -311,13 +422,14 @@ export const THS_BLOCKED_NOTICE =
   '同花顺清单不可用：本轮无法采集（清单是板块全集的来源）；已用本地缓存清单或宿主行业清单兜底的轮次不受影响。';
 
 /**
- * 散户因子缺席的提示模板
+ * 散户因子缺席的提示模板（count 为缺席数 —— v1.1.0 曾把分子写成 total - count，
+ * 全缺席时显示「0/20 缺席」的假数，2026-10-31 修正）
  * @param count 缺席板块数
  * @param total 目标板块总数
  * @returns 提示文案
  */
 export const fflowMissNotice = (count: number, total: number): string =>
-  `东财资金拆分本轮 ${total - count}/${total} 个板块缺席（限流中），散户因子以可得子集计算；恢复后采集自动补历史。`;
+  `东财资金拆分本轮 ${count}/${total} 个板块缺席（限流中），散户因子以可得子集计算；恢复后采集自动补历史。`;
 
 /** 采集进行中的进度卡标题 */
 export const PROGRESS_CARD_TITLE = '正在采集更新';

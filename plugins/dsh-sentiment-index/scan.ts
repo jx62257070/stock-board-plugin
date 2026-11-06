@@ -5,15 +5,20 @@
  * 1. 当日快照：**同花顺清单**（行业 thshy + 概念 gn，各含当日快照字段）——
  *    失败降级链：refs 缓存 → 宿主 fetchIndustryBoards（行业，缺当日快照）→ 抛错；
  * 2. 全市场分母：宿主 fetchMarketTurnover（腾讯，主选）→ 东财指数日K（次选）→ 本地缓存；
- * 3. 增量历史：关注板块逐板块「**同花顺年K**（价量额，必须成功）+ **东财 fflow**（小单拆分，尽力）」，
- *    与本地按日期合并（并发 ≤3 + 每请求 500ms 错峰；单板块失败不阻塞，隔 2s 补采一轮）；
+ * 3. 增量历史：三段各守各的频率红线 —— **同花顺年K**（价量额，必须成功）并发 ≤3 +
+ *    500ms 错峰、失败隔 2s 补采一轮；**东财 fflow**（小单拆分，尽力）走**串行慢车道**
+ *    （前置探测 + 1.2s 间隔 + 连拒熔断，dsh-mainline 实测红线）；**东财 clist 四档
+ *    资金快照**（自积累主通道）在车道后追加当日行 —— 与本地按日期合并；
  * 4. 涨停池：东财 push2ex（基准日 1 请求，首次安装回补近 30 个交易日）+ 炸板 / 跌停池总数；
  * 5. 重算指数：全部板块全量重算（纯函数）→ 落库 → 看板响应式刷新。
  *
  * 混源降级语义（2026-10-30 混合源改造，王总确认）：
  * - 同花顺（主源）不可用 → 整轮采集 block（清单是板块全集的来源，无可绕过）；
  * - 东财 fflow 不可用 → **不 block**：散户因子当日缺席（权重自动重分配），
- *   价量与热度照常累积，恢复后采集自动补历史；fflow 失败不进失败清单（不重试）；
+ *   价量与热度照常累积，恢复后采集自动补历史；fflow 失败不进失败清单（不重试），
+ *   封禁窗口内由前置探测 / 连拒熔断整段跳过 —— 对封禁中上游连发只会延长封禁；
+ * - clist 四档快照（push2 域，走桥）与 fflow 历史接口**互相独立**：fflow 全灭期间
+ *   散户因子仍靠快照逐日自积累（无 121 日回补，分位窗口自安装日起算）；
  * - 东财分母不可用 → 腾讯主选已兜住；两级都失败才用本地缓存序列。
  *
  * 落定口径：本地时间 < 15:30 且分母序列末位是当日时，当日视为未落定 ——
@@ -22,6 +27,10 @@
 import {
   DEFAULT_WATCH_CONCEPT_TOP,
   DEFAULT_WATCH_INDUSTRY_TOP,
+  EM_BLOCKED_NOTICE,
+  EM_FFLOW_BLOCK_ABORT_RUNS,
+  EM_FFLOW_BLOCK_COOLDOWN_MS,
+  EM_FFLOW_SCAN_DELAY_MS,
   fflowMissNotice,
   LIMIT_UP_BACKFILL_DAYS,
   MAX_HISTORY_DAYS,
@@ -29,16 +38,21 @@ import {
   SCAN_DELAY_MS,
   SCAN_RETRY_DELAY_MS,
   SCAN_STEPS,
+  SENTIMENT_PLUGIN_ID,
   SETTLE_MINUTES,
   TAIL_KEEP_DAYS,
 } from './constants';
 import {
   fetchBoardFflow,
+  fetchBoardFundSnapshot,
   fetchEmBoardUniverse,
   fetchMarketSeries,
   fetchPoolTotal,
+  isConnectionError,
   matchThsToEm,
+  probeEmFflow,
 } from './em-data';
+import { getEmBridgeDiagnostic, resetEmBridgeDiagnostic } from './em-bridge';
 import { buildMarketMap, computeIndexSeries } from './judge';
 import type { SentimentRepo } from './storage';
 import { fetchThsBoardList, fetchThsBoardKline } from './ths-data';
@@ -320,29 +334,36 @@ interface WatchFetch {
   fflows: Awaited<ReturnType<typeof fetchBoardFflow>> | null;
 }
 
+/** fflow 串行慢车道的结果（缺席计数 + 封禁判定，横幅文案分级用） */
+interface FflowLaneResult {
+  /** 散户因子缺席的板块数（无映射 / 取数失败 / 熔断跳过都算） */
+  missCount: number;
+  /** 东财是否判定处于封禁窗口（探测 blocked 或车道内连拒熔断） */
+  blocked: boolean;
+  /** 首个缺席原因（横幅透出，定位桥 / 映射 / 上游哪一环出的问题；空串 = 全量到齐） */
+  missReason: string;
+}
+
 /**
- * 并发拉取关注板块的增量历史（THS 年K 必须 + EM fflow 尽力；失败补采一轮）
+ * THS 年 K 段（必须成功；并发 ≤3 + 500ms 错峰，失败隔 2s 补采一轮）
  *
- * fflow 的前提是 THS→BK 名称映射（`emMap`）：映射缺失的板块散户因子缺席（不猜映射）。
+ * fflow 已拆到独立的串行慢车道（`runFflowLane`）：两个上游各有各的频率红线，
+ * 混在同一个 worker 循环里会让东财跟着同花顺的节奏连发 —— 2026-10-31 前整轮
+ * 0/20 全拒的主因。THS 成功的板块在此占位（fflows 先置 null，等车道回填）。
  * @param deps 宿主能力集合
  * @param targets 待采集板块
- * @param emMap THS 代码 → 东财 BK 代码映射
- * @param onProgress 进度回调（首轮计数）
- * @returns 板块代码 → 取数结果、THS 失败清单、fflow 缺席数
+ * @param data 取数结果落点
+ * @param failures THS 失败清单（落点）
+ * @param onProgress 进度回调
+ * @returns void
  */
-const fetchWatchHistories = async (
+const runThsPass = async (
   deps: SentimentDeps,
   targets: readonly BoardRef[],
-  emMap: Readonly<Record<string, string>>,
+  data: Map<string, WatchFetch>,
+  failures: Map<string, string>,
   onProgress?: (progress: ScanProgress) => void,
-): Promise<{
-  data: Map<string, WatchFetch>;
-  failures: Map<string, string>;
-  fflowMissCount: number;
-}> => {
-  const data = new Map<string, WatchFetch>();
-  const failures = new Map<string, string>();
-  let fflowMissCount = 0;
+): Promise<void> => {
   let done = 0;
 
   const runPass = async (passTargets: readonly BoardRef[], delayMs: number): Promise<void> => {
@@ -353,15 +374,8 @@ const fetchWatchHistories = async (
         cursor += 1;
         onProgress?.({ step: SCAN_STEPS.HISTORY, done, total: targets.length, current: target.name });
         try {
-          // 两个请求分属不同上游（d.10jqka / push2his），各自受并发与错峰约束；
-          // fflow 失败 / 无映射只记缺席数（散户因子缺席降级），不影响板块成功与否
           const klines = await fetchThsBoardKline(deps, target.code, new Date().getFullYear());
-          const bkCode = emMap[target.code] ?? null;
-          const fflows = bkCode
-            ? await fetchBoardFflow(deps, bkCode).catch(() => null)
-            : null;
-          if (fflows === null) fflowMissCount += 1;
-          data.set(target.code, { klines, fflows });
+          data.set(target.code, { klines, fflows: null });
           failures.delete(target.code);
         } catch (error) {
           failures.set(target.code, error instanceof Error ? error.message : String(error));
@@ -384,7 +398,180 @@ const fetchWatchHistories = async (
       SCAN_RETRY_DELAY_MS,
     );
   }
-  return { data, failures, fflowMissCount };
+};
+
+/**
+ * 东财 fflow 串行慢车道（散户因子唯一来源，全网不可替代）
+ *
+ * 2026-10-31 改造，对齐 dsh-mainline 实测红线「间隔 ≥1s 正常、短时连发立刻拒连
+ * （TCP RST）、停顿约 20s 恢复」：
+ * 1. 前置 `probeEmFflow`（单板块 lmt=1 轻量探测）：封禁中 → 整段跳过，0 次无效请求；
+ * 2. 逐板块**串行**拉取，相邻请求隔 `EM_FFLOW_SCAN_DELAY_MS`；
+ * 3. 连接被拒不重试（对封禁中上游连发只会延长封禁）：首拒停
+ *    `EM_FFLOW_BLOCK_COOLDOWN_MS` 等窗口自愈再继续；连续 `EM_FFLOW_BLOCK_ABORT_RUNS`
+ *    次被拒即熔断跳出，剩余板块记缺席、不再发请求；
+ * 4. 缺席板块不进失败清单（fflow 是尽力源）；恢复后下次采集按 lmt=0 全量自动补历史。
+ *
+ * THS 失败的板块不进车道：fflow 不开新行（mergeBoardDays 以日 K 日历为准），没有
+ * 日 K 就没处挂资金拆分。
+ * @param deps 宿主能力集合
+ * @param targets 待采集板块（THS 段已跑完）
+ * @param emMap THS 代码 → 东财 BK 代码映射
+ * @param data 取数结果落点（只回填 THS 成功板块的 fflows）
+ * @param onProgress 进度回调（车道内 current 标注「资金拆分」；进度条已满、只换文案属预期）
+ * @returns 缺席数与封禁判定
+ */
+const runFflowLane = async (
+  deps: SentimentDeps,
+  targets: readonly BoardRef[],
+  emMap: Readonly<Record<string, string>>,
+  data: Map<string, WatchFetch>,
+  onProgress?: (progress: ScanProgress) => void,
+): Promise<FflowLaneResult> => {
+  let missCount = 0;
+
+  // 无映射的板块直接记缺席（映射是 fflow 的前提，不猜映射 —— 同 runScan 的口径）
+  const laneBoards: { target: BoardRef; bkCode: string }[] = [];
+  for (const target of targets) {
+    if (!data.has(target.code)) continue;
+    const bkCode = emMap[target.code] ?? '';
+    if (!bkCode) {
+      missCount += 1;
+      continue;
+    }
+    laneBoards.push({ target, bkCode });
+  }
+  if (laneBoards.length === 0) {
+    return {
+      missCount,
+      blocked: false,
+      missReason:
+        missCount > 0 ? 'THS→BK 名称映射未命中（映射清单未取到且缓存为空，映射层见 em-data）' : '',
+    };
+  }
+
+  // 前置探测：封禁中整段跳过（2026-10-31 前这里会接着连发 20 发并全数被拒）
+  const probe = await probeEmFflow(deps);
+  if (probe.kind === 'blocked') {
+    return {
+      missCount: missCount + laneBoards.length,
+      blocked: true,
+      missReason: `探测连接被拒（${probe.message || '连接层错误'}）`,
+    };
+  }
+
+  let consecutiveBlocked = 0;
+  let aborted = false;
+  let firstMissReason = '';
+  for (let index = 0; index < laneBoards.length; index += 1) {
+    const { target, bkCode } = laneBoards[index];
+    onProgress?.({
+      step: SCAN_STEPS.HISTORY,
+      done: targets.length,
+      total: targets.length,
+      current: `资金拆分 · ${target.name}`,
+    });
+    try {
+      const fflows = await fetchBoardFflow(deps, bkCode);
+      const entry = data.get(target.code);
+      if (entry) entry.fflows = fflows;
+      consecutiveBlocked = 0;
+    } catch (error) {
+      missCount += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!firstMissReason) firstMissReason = message;
+      if (isConnectionError(message)) {
+        consecutiveBlocked += 1;
+        if (consecutiveBlocked >= EM_FFLOW_BLOCK_ABORT_RUNS) {
+          // 熔断：封禁窗口仍开着，剩余板块不再连发（等恢复后采集自动补历史）
+          missCount += laneBoards.length - 1 - index;
+          aborted = true;
+          break;
+        }
+        // 首拒：停一拍等封禁窗口自愈（实测约 20s），后续板块还能救回来
+        await deps.format.delay(EM_FFLOW_BLOCK_COOLDOWN_MS);
+      }
+      // HTTP / 解析类失败：正常缺席，按常规节奏继续（fetchText 内已有小步重试）
+    }
+    if (index < laneBoards.length - 1) await deps.format.delay(EM_FFLOW_SCAN_DELAY_MS);
+  }
+  // 可诊断性：缺席必有一个「为什么」——桥失败（回退日志在 em-bridge） / 数据空 / HTTP 错误，
+  // 这里汇总首个原因，devtools console 过滤插件 id 即可定位
+  if (firstMissReason) {
+    console.warn(
+      `[plugin] ${SENTIMENT_PLUGIN_ID} fflow 串行车道缺席 ${missCount}/${laneBoards.length}，`
+      + `首个失败原因：${firstMissReason}`,
+    );
+  }
+  return { missCount, blocked: aborted, missReason: firstMissReason };
+};
+
+/**
+ * 拉取关注板块的增量历史（THS 年K 必须 + EM fflow 尽力 + clist 四档快照自积累；
+ * 三段各守各的频率红线与降级语义）
+ *
+ * fflow 的前提是 THS→BK 名称映射（`emMap`）：映射缺失的板块散户因子缺席（不猜映射）。
+ * @param deps 宿主能力集合
+ * @param targets 待采集板块
+ * @param emMap THS 代码 → 东财 BK 代码映射
+ * @param fundDate 四档资金快照的落库交易日（空串 = 盘中未落定，整步跳过）
+ * @param onProgress 进度回调（首轮计数）
+ * @returns 板块代码 → 取数结果、THS 失败清单、fflow 缺席数、fflow 封禁判定
+ */
+const fetchWatchHistories = async (
+  deps: SentimentDeps,
+  targets: readonly BoardRef[],
+  emMap: Readonly<Record<string, string>>,
+  fundDate: string,
+  onProgress?: (progress: ScanProgress) => void,
+): Promise<{
+  data: Map<string, WatchFetch>;
+  failures: Map<string, string>;
+  fflowMissCount: number;
+  fflowBlocked: boolean;
+  fflowMissReason: string;
+}> => {
+  const data = new Map<string, WatchFetch>();
+  const failures = new Map<string, string>();
+  resetEmBridgeDiagnostic();
+  await runThsPass(deps, targets, data, failures, onProgress);
+  const lane = await runFflowLane(deps, targets, emMap, data, onProgress);
+
+  // 东财 clist 四档资金快照（自积累主通道，2026-10-31）：置于 fflow 车道**之后**
+  // 追加，同日以快照值覆盖（clist 当日截面比 fflow 日线的当日行更晚落定、更接近
+  // 终值）。fundDate 为空（盘中未落定）整步跳过 —— 半日值入库会永久污染分位序列；
+  // 桥 / http 全部失败时静默降级（当日散户因子缺席，不阻塞采集）。
+  if (fundDate) {
+    const fundRows = await fetchBoardFundSnapshot(deps).catch(() => null);
+    if (fundRows && fundRows.size > 0) {
+      const thsByBk = new Map(Object.entries(emMap).map(([thsCode, bkCode]) => [bkCode, thsCode]));
+      for (const [bkCode, row] of fundRows) {
+        const thsCode = thsByBk.get(bkCode);
+        const entry = thsCode ? data.get(thsCode) : undefined;
+        if (!entry) continue;
+        entry.fflows = [
+          ...(entry.fflows ?? []),
+          {
+            date: fundDate,
+            mainNet: row.mainNet,
+            mainRatio: row.mainRatio,
+            smallNet: row.smallNet,
+            smallRatio: row.smallRatio,
+          },
+        ];
+      }
+    }
+  }
+
+  return {
+    data,
+    failures,
+    fflowMissCount: lane.missCount,
+    fflowBlocked: lane.blocked,
+    // 桥诊断不并入 reason：映射等原因与桥状态是两个独立事实（映射失败可能正是桥失败
+    // 的结果），由调用方拼接两者 —— 桥成功时 getEmBridgeDiagnostic 为空串自然省略
+    fflowMissReason: lane.missReason,
+  };
 };
 
 /**
@@ -430,7 +617,11 @@ export const runScan = async (
   }
   if (industryRows.length === 0) {
     // refs 缓存也没有：主源不可用且无历史清单，本轮确实做不了（不引入东财 BK 码双体系）
-    throw new Error(listError || '同花顺行业清单不可用（接口返回空数据）');
+    // 报错带上下文：连接层失败（error sending request）≈ 对方限流拉黑，稍后自愈
+    throw new Error(
+      `同花顺清单不可用${listError ? `（${listError}）` : '（接口返回空数据）'}`
+      + ' —— 若为「error sending request」多为对方限流拉黑（频繁采集触发），等几十分钟自愈后重试',
+    );
   }
   const refsAll: BoardRef[] = [
     ...industryRows.map((row) => ({ code: row.code, name: row.name, kind: 'industry' as const })),
@@ -446,6 +637,9 @@ export const runScan = async (
   const settle = resolveSettle(market, new Date());
   if (!settle.asOf) throw new Error('分母序列为空，无法确定基准交易日');
   const marketSettled = settle.market;
+  // 快照日：未落定日被排除时本轮不写快照字段（防半日值入库）——历史步的
+  // 四档资金快照与步骤 5 的当日快照合并共用这一个判定
+  const snapshotDate = settle.excludedDate ? '' : settle.asOf;
   const marketMap = buildMarketMap(marketSettled);
   const marketDates = marketSettled.map((point) => point.date);
 
@@ -465,13 +659,21 @@ export const runScan = async (
   const emMap: Record<string, string> = { ...before.emMap, ...emMapFresh };
   await repo.saveEmMap(emMap);
 
-  const fetched = await fetchWatchHistories(deps, targetRefs, emMap, onProgress);
+  const fetched = await fetchWatchHistories(deps, targetRefs, emMap, snapshotDate, onProgress);
 
   // fflow 缺席提示（东财封禁中不 block，只提示散户因子缺席；经 ScanResult 透出给页面）
+  // 封禁判定（前置探测 blocked / 车道连拒熔断）用 EM_BLOCKED_NOTICE 讲清机制，
+  // 其余部分缺席按数报（v1.1.0 分子颠倒已修：全部缺席显示 20/20 而非 0/20）；
+  // 失败原因与桥状态并列透出 —— 「映射未命中 + 桥未就绪」即桥失败的因果链，一眼定位
+  const bridgeDiag = getEmBridgeDiagnostic();
+  const reasonParts = [fetched.fflowMissReason, bridgeDiag].filter(Boolean);
   const missNotice =
-    fetched.fflowMissCount > 0 && fetched.failures.size < targetRefs.length
-      ? fflowMissNotice(fetched.fflowMissCount, targetRefs.length)
-      : '';
+    fetched.fflowMissCount === 0 || fetched.failures.size >= targetRefs.length
+      ? ''
+      : fetched.fflowBlocked
+        ? EM_BLOCKED_NOTICE
+        : `${fflowMissNotice(fetched.fflowMissCount, targetRefs.length)}`
+          + (reasonParts.length > 0 ? ` 首个失败原因：${reasonParts.join('；')}` : '');
 
   // ---- 4) 涨停池（首扫回补近 30 个交易日） + 炸板 / 跌停池 ----
   onProgress?.({ step: SCAN_STEPS.LIMIT_UP, done: 0, total: 1 });
@@ -532,8 +734,6 @@ export const runScan = async (
 
   // ---- 5) 合并板块事实 + 全量重算指数 ----
   onProgress?.({ step: SCAN_STEPS.COMPUTE, done: 0, total: 1 });
-  // 快照日：未落定日被排除时本轮不写快照字段（防半日值入库）
-  const snapshotDate = settle.excludedDate ? '' : settle.asOf;
   const watchCodeSet = new Set(watchlist);
   const existingByCode = new Map(before.boards.map((board) => [board.code, board]));
 

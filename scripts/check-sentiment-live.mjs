@@ -12,8 +12,9 @@
  * 实测：kline/fflow/pool 先解封、clist 接口级 TCP RST 仍在），清单解封后再跑
  * `runScan` 全流程。这里用硬编码已知板块代码直连底层数据链。
  *
- * 断言覆盖：
- * 1. 板块日 K（push2his kline）：行数、首尾日期、价量额字段；
+ * 断言覆盖（2026-10-31 对齐 v1.1.0 混合源：板块日 K 主源已迁同花顺，fflow 仍走东财）：
+ * 1. 板块日 K（**同花顺** d.10jqka 年K，主源；板块按行业清单名含「半导体」解析，
+ *    与东财 BK1036 同一语义板块）：行数、首尾日期、价量额字段；
  * 2. fflow daykline：行数（≈121 日深度）、小单净占比非空行数、抽样值；
  * 3. 沪深指数分母：两序列行数 >300、合计 >0；
  * 4. 合并 + 指标：computeIndexSeries 长度对齐、尾日双指数在 0~100、
@@ -65,32 +66,41 @@ const EM_REFERER = 'https://quote.eastmoney.com/';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * curl 子进程 fetch（Response-like：ok / status / text()）
+ * curl 子进程 fetch（Response-like：ok / status / text() / arrayBuffer()）
  *
  * 为什么不用 Node 原生 fetch：2026-10-30 实测 Node 24 undici 的 TLS 指纹被东财
  * push2 系 WAF 识别拒绝（`other side closed`，加浏览器 UA 也无效），而 curl 指纹
  * 放行 —— 宿主运行时走 Tauri Rust reqwest / WebView，同为「非 undici」指纹，
  * 不受影响；脚本侧用 curl 与宿主语义等价（外部可信 HTTP 客户端）。
+ *
+ * encoding: 'buffer'：同花顺清单 / 年K 是 GBK 字节流（decodeGbk 吃 ArrayBuffer），
+ * 走 utf8 字符串会不可逆乱码，必须按原始字节取回。
  * @param {string} url 目标地址
  * @param {{headers?: Record<string, string>}} [init] 请求头
- * @returns {Promise<{ok: boolean, status: number, text: () => Promise<string>}>} 响应
+ * @returns {Promise<{ok: boolean, status: number, text: () => Promise<string>, arrayBuffer: () => Promise<ArrayBuffer>}>} 响应
  */
 const curlFetch = async (url, init = {}) => {
   const args = ['-s', '--max-time', '15', '-w', '__STATUS__%{http_code}'];
   for (const [key, value] of Object.entries(init.headers ?? {})) args.push('-H', `${key}: ${value}`);
   args.push(url);
-  const { stdout } = await execFileAsync('curl', args, { maxBuffer: 64 * 1024 * 1024 });
-  const marker = stdout.lastIndexOf('__STATUS__');
-  const status = Number(stdout.slice(marker + '__STATUS__'.length).trim());
-  const body = stdout.slice(0, marker);
-  return { ok: status >= 200 && status < 300, status, text: async () => body };
+  const { stdout } = await execFileAsync('curl', args, { maxBuffer: 64 * 1024 * 1024, encoding: 'buffer' });
+  const marker = Buffer.from('__STATUS__');
+  const markerAt = stdout.lastIndexOf(marker);
+  const status = Number(stdout.subarray(markerAt + marker.length).toString('utf8').trim());
+  const body = stdout.subarray(0, markerAt);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => body.toString('utf8'),
+    arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+  };
 };
 
 /** 宿主 deps 桩（与插件运行时同签名，网络走 curl） */
 const deps = {
   http: {
     fetch: curlFetch,
-    allowedHosts: ['eastmoney.com'],
+    allowedHosts: ['eastmoney.com', '10jqka.com'],
     isAllowed: () => true,
   },
   format: {
@@ -248,11 +258,21 @@ const emData = await server.ssrLoadModule('/plugins/dsh-sentiment-index/em-data.
 const judge = await server.ssrLoadModule('/plugins/dsh-sentiment-index/judge.ts');
 const storage = await server.ssrLoadModule('/plugins/dsh-sentiment-index/storage.ts');
 const scan = await server.ssrLoadModule('/plugins/dsh-sentiment-index/scan.ts');
+const thsData = await server.ssrLoadModule('/plugins/dsh-sentiment-index/ths-data.ts');
 
-process.stdout.write('\n== 1) 板块日 K（push2his kline） ==\n');
-const klines = await emData.fetchBoardKline(deps, 'BK1036');
-process.stdout.write(`  行数 ${klines.length}，首 ${klines[0]?.date}，尾 ${klines.at(-1)?.date}\n`);
-assert(klines.length > 250, `半导体日 K 行数应 >250（实际 ${klines.length}）`);
+process.stdout.write('\n== 1) 同花顺板块日 K（混合源主源） ==\n');
+const industryList = await thsData.fetchThsBoardList(deps, 'industry');
+const thsBoard = industryList.refs.find((ref) => ref.name.includes('半导体'));
+if (!thsBoard) {
+  throw new Error(`同花顺行业清单里找不到名含「半导体」的板块（共 ${industryList.refs.length} 个行业）`);
+}
+// v1.1.0 起板块日 K 主源是同花顺（THS 码 88xxxx）；fflow 侧的东财 BK1036 与之同板块异码，
+// 真实链路由 THS→BK 名称映射对齐（scan.ts emMap），这里按名字直接对上
+const klines = await thsData.fetchThsBoardKline(deps, thsBoard.code, new Date().getFullYear());
+process.stdout.write(
+  `  ${thsBoard.name}（${thsBoard.code}）行数 ${klines.length}，首 ${klines[0]?.date}，尾 ${klines.at(-1)?.date}\n`,
+);
+assert(klines.length > 150, `日 K 行数应 >150（当年文件约 200 交易日，实际 ${klines.length}）`);
 assert(klines.at(-1)?.close !== null && klines.at(-1)?.amount > 0, '尾行应含收盘价与成交额');
 
 process.stdout.write('\n== 2) fflow daykline（小单拆分） ==\n');
@@ -264,7 +284,11 @@ process.stdout.write(
 );
 assert(fflows.length > 90, `fflow 深度应 >90 交易日（实测上游 ≈121，实际 ${fflows.length}）`);
 assert(smallRows.length === fflows.length, 'fflow 全部行应有小单净占比（f58）');
-assert(fflows.at(-1)?.date === klines.at(-1)?.date, 'fflow 尾日应与日 K 尾日一致（同一板块日历）');
+// 跨源日历（THS 日K vs 东财 fflow）偶有出入（mergeBoardDays「fflow 不开新行」即为此设），
+// 尾日按自然日贴近校验而非严格相等
+const tailGapDays =
+  Math.abs(Date.parse(fflows.at(-1)?.date ?? '') - Date.parse(klines.at(-1)?.date ?? '')) / 86400000;
+assert(tailGapDays <= 7, `fflow 尾日应与日 K 尾日贴近（≤7 日，实际差 ${tailGapDays.toFixed(0)} 日）`);
 
 process.stdout.write('\n== 3) 沪深指数分母（同源） ==\n');
 const [shAmounts, szAmounts] = await Promise.all([
@@ -283,7 +307,7 @@ assert(market.length > 300, `分母序列应 >300 交易日（实际 ${market.le
 assert(market.at(-1)?.totalAmount > 1e10, '尾日两市成交额应为真实量级（>100 亿）');
 
 process.stdout.write('\n== 4) 合并 + 指标计算 ==\n');
-const boardRef = { code: 'BK1036', name: '半导体', kind: 'industry' };
+const boardRef = { code: thsBoard.code, name: thsBoard.name, kind: 'industry' };
 const merged = scan.mergeBoardDays(undefined, boardRef, klines, fflows, null, '', new Map(), klines.at(-1)?.date ?? '');
 const marketMap = judge.buildMarketMap(market);
 const series = judge.computeIndexSeries(merged.days, marketMap);

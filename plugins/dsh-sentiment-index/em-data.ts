@@ -8,11 +8,24 @@
  *   ⚠️ 封禁窗口式反复（2026-10-30 实测，接口路径粒度）——连接被拒不重试（对封禁中
  *   上游连发只会延长封禁），调用方按「因子缺席」降级，恢复后自动补历史；
  * - **涨停 / 炸板 / 跌停池**（push2ex，一直未被风控波及）；
- * - **沪深指数日 K**（分母次选：主分母是宿主 fetchMarketTurnover 腾讯源）。
+ * - **沪深指数日 K**（分母次选：主分母是宿主 fetchMarketTurnover 腾讯源）；
+ * - **clist 四档资金流快照**（2026-10-31 新增，散户因子自积累主通道）：
+ *   每天 1~2 个请求拉全板块当日主力/小单净额与净占比，落库自建历史，
+ *   从此 push2his fflow 历史接口持续被封也能逐日累积散户因子。
  *
- * 频率红线：调用方并发 ≤3 + 每请求 500ms 错峰；本层只做 HTTP 5xx 的原地小步重试。
+ * 传输层（2026-10-31）：东财 push2 系 WAF 按「浏览器 TLS 指纹 + 东财域 Referer」
+ * 双条件放行，reqwest 指纹被连接层拒连 —— push2his / push2 / push2delay 的请求
+ * 优先走宿主注入的 JSONP 桥（em-bridge.ts，WebView 指纹 + 东财 Referer），桥缺席
+ * 或失败回退 app:http；push2ex 池子未被风控波及，恒走 app:http。
+ *
+ * 频率红线（2026-10-31 收紧）：fflow 由调用方走**串行慢车道**（1.2s 间隔 + 探测 +
+ * 连拒熔断，见 scan.ts 与 EM_FFLOW_* 常量）——dsh-mainline 实测东财行情域
+ * 「间隔 ≥1s 正常、短时连发立刻拒连（停顿约 20s 恢复）」；本层只做 HTTP 5xx 的原地小步重试。
  */
 import {
+  EM_CLIST_FUND_MAX_PAGES,
+  EM_CLIST_FUND_PAGE_SIZE,
+  EM_CLIST_FUND_URL_TEMPLATE,
   EM_CLIST_MAX_PAGES,
   EM_CLIST_PAGE_SIZE,
   EM_CLIST_URL_TEMPLATE,
@@ -30,6 +43,7 @@ import {
   KLINE_YEARS_BACK,
   SCAN_DELAY_MS,
 } from './constants';
+import { fetchEmBridgeText } from './em-bridge';
 import type { SentimentDeps } from './types';
 
 /** fflow 行的最少字段数（fields2 到 f61 = 11 列；上游若回旧口径少于 8 列则小单缺席） */
@@ -288,6 +302,106 @@ export const matchThsToEm = (
   return map;
 };
 
+// ---------- 四档资金流快照（散户因子自积累主通道，2026-10-31 新增） ----------
+
+/** 东财板块四档资金流快照行（clist f62/f184/f84/f87；与 fflow 行的合并形态对齐） */
+export interface FundSnapshotRow {
+  /** 东财板块代码（BKxxxx） */
+  code: string;
+  /** 板块名称 */
+  name: string;
+  /** 主力净流入（元） */
+  mainNet: number | null;
+  /** 主力净占比（%） */
+  mainRatio: number | null;
+  /** 小单净流入（元） */
+  smallNet: number | null;
+  /** 小单净占比（%） */
+  smallRatio: number | null;
+}
+
+/** 快照行字段键（clist 资金流字段族） */
+const EM_FUND_FIELD = {
+  CODE: 'f12',
+  NAME: 'f14',
+  MAIN_NET: 'f62',
+  MAIN_RATIO: 'f184',
+  SMALL_NET: 'f84',
+  SMALL_RATIO: 'f87',
+} as const;
+
+/**
+ * 解析东财四档资金流快照 JSON（纯函数）
+ * @param text 响应文本（UTF-8 JSON）
+ * @returns 快照行（按代码去重；脏行丢弃）
+ */
+export const parseClistFundJson = (text: string): FundSnapshotRow[] => {
+  let payload: { data?: { diff?: unknown } };
+  try {
+    payload = JSON.parse(text) as { data?: { diff?: unknown } };
+  } catch {
+    return [];
+  }
+  const diff = payload.data?.diff;
+  const rawRows: unknown[] = Array.isArray(diff)
+    ? diff
+    : diff && typeof diff === 'object'
+      ? Object.values(diff)
+      : [];
+  const rows: FundSnapshotRow[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawRows) {
+    if (!raw || typeof raw !== 'object') continue;
+    const row = raw as Record<string, unknown>;
+    const code = typeof row[EM_FUND_FIELD.CODE] === 'string' ? String(row[EM_FUND_FIELD.CODE]).trim() : '';
+    const name = typeof row[EM_FUND_FIELD.NAME] === 'string' ? String(row[EM_FUND_FIELD.NAME]).trim() : '';
+    if (!code.startsWith('BK') || !name || seen.has(code)) continue;
+    seen.add(code);
+    rows.push({
+      code,
+      name,
+      mainNet: toNumber(row[EM_FUND_FIELD.MAIN_NET]),
+      mainRatio: toNumber(row[EM_FUND_FIELD.MAIN_RATIO]),
+      smallNet: toNumber(row[EM_FUND_FIELD.SMALL_NET]),
+      smallRatio: toNumber(row[EM_FUND_FIELD.SMALL_RATIO]),
+    });
+  }
+  return rows;
+};
+
+/**
+ * 拉取全板块四档资金流快照（行业 + 概念各一页收全；**尽力**，失败返回已收到的部分）
+ *
+ * 与 fflow 历史接口互相独立：本快照是当日截面（无历史深度），由调用方按交易日
+ * 落库自建历史；桥 / http 任一通道成功即可。`"-"` / 非数字按缺席处理（绝不当作 0）。
+ * @param deps 宿主能力集合
+ * @returns BK 代码 → 快照行
+ */
+export const fetchBoardFundSnapshot = async (
+  deps: SentimentDeps,
+): Promise<Map<string, FundSnapshotRow>> => {
+  const merged = new Map<string, FundSnapshotRow>();
+  for (const fs of [EM_FS_INDUSTRY, EM_FS_CONCEPT]) {
+    for (let page = 1; page <= EM_CLIST_FUND_MAX_PAGES; page += 1) {
+      if (page > 1) await deps.format.delay(SCAN_DELAY_MS);
+      const url = EM_CLIST_FUND_URL_TEMPLATE
+        .replace('{pn}', String(page))
+        .replace('{pz}', String(EM_CLIST_FUND_PAGE_SIZE))
+        .replace('{fs}', fs);
+      let rows: FundSnapshotRow[];
+      try {
+        rows = parseClistFundJson(await fetchText(deps, url));
+      } catch (error) {
+        console.warn('[plugin] dsh-sentiment-index 东财四档资金流快照取数失败（当日散户因子可能缺席）', error);
+        break;
+      }
+      if (rows.length === 0) break;
+      for (const row of rows) if (!merged.has(row.code)) merged.set(row.code, row);
+    }
+  }
+  return merged;
+};
+
 // ---------- fflow 与池子 ----------
 
 /**
@@ -308,15 +422,19 @@ export const isConnectionError = (message: string): boolean =>
   CONNECTION_ERROR_PATTERN.test(message);
 
 /**
- * 带 Referer 的受控请求
+ * 受控请求（东财行情域桥优先，其余与 http 同构）
  *
- * 重试策略按错误分层：连接被拒（上游临时封禁中）只试 1 次立即放弃；
- * HTTP 非 2xx / 解析异常保持原地小步重试（网关瞬时簇稍等自愈）。
+ * 重试策略按错误分层：桥通道不重试（失败即回退）；连接被拒（上游临时封禁中）
+ * 只试 1 次立即放弃；HTTP 非 2xx / 解析异常保持原地小步重试（网关瞬时簇稍等自愈）。
  * @param deps 宿主能力集合
  * @param url 目标地址
  * @returns 响应文本
  */
 const fetchText = async (deps: SentimentDeps, url: string): Promise<string> => {
+  // 东财行情域（push2his / push2 / push2delay）优先走 JSONP 桥；非桥域（push2ex）
+  // 与桥失败回退都落到下面的 app:http 原通道
+  const bridged = await fetchEmBridgeText(url);
+  if (bridged !== null) return bridged;
   let lastError = '未知错误';
   for (let attempt = 0; attempt < EM_FETCH_ATTEMPTS; attempt += 1) {
     if (attempt > 0) await deps.format.delay(SCAN_DELAY_MS);
@@ -354,7 +472,8 @@ export interface EmFflowProbe {
  * @returns 探测结果
  */
 export const probeEmFflow = async (deps: SentimentDeps): Promise<EmFflowProbe> => {
-  const url = `${EM_FFLOW_URL_TEMPLATE.replace('{secid}', encodeURIComponent('90.BK1036'))}&lmt=1`;
+  // 模板的 lmt=0 是全量拉取口径，探测只要 1 条：就地替换，避免 lmt=0&lmt=1 重复参数
+  const url = EM_FFLOW_URL_TEMPLATE.replace('{secid}', encodeURIComponent('90.BK1036')).replace('lmt=0', 'lmt=1');
   try {
     const rows = parseFflowJson(await fetchText(deps, url));
     if (rows.length === 0) return { ok: false, kind: 'error', message: 'fflow 返回空数据' };
