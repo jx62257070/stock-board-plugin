@@ -1318,9 +1318,9 @@ const runAiAnalysis = async (): Promise<void> => {
             <!-- 净持仓 hero：大号数字锚点 + 净增减胶囊 -->
             <div class="flex items-start justify-between gap-2">
               <div class="min-w-0">
-                <div class="text-xs text-text-tertiary">净持仓（手）</div>
+                <div class="text-sm font-medium text-text-tertiary">净持仓（手）</div>
                 <div
-                  class="mt-1 text-lg leading-none font-bold tabular-nums"
+                  class="mt-1.5 text-3xl leading-none font-bold tracking-tight tabular-nums"
                   :class="signClass(profile.net)"
                 >
                   {{ signed(profile.net) }}
