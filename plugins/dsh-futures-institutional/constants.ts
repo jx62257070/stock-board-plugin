@@ -89,6 +89,29 @@ export const CCPM_SYNC_HISTORY_DAYS = 60;
 /** 会话内数据缓存 TTL（毫秒）：披露日数据收盘后定稿，缓存 30 分钟即可 */
 export const CCPM_CACHE_TTL_MS = 30 * 60 * 1000;
 
+// ---------- 中信期货 × 大盘指数 曲线对照 ----------
+
+/** 腾讯日 K 接口（`param=<symbol>,day,<起>,<止>,<条数>,<复权>`；口径同宿主 turnover.api.ts） */
+export const INDEX_COMBO_KLINE_URL = 'https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get';
+
+/** 腾讯源需要 gu.qq.com 作为 Referer，否则可能被拒 */
+export const INDEX_COMBO_KLINE_REFERER = 'https://gu.qq.com/';
+
+/** 单指数日 K 拉取条数（≈1.5 年交易日，覆盖曲线对照回看窗口绰绰有余） */
+export const INDEX_COMBO_KLINE_MAX_DAYS = 400;
+
+/**
+ * 曲线对照的大盘指数清单（腾讯符号形态；线色为固定十六进制——
+ * 明暗两主题下均可读，且不与柱状的语义色（涨红跌绿）抢含义）
+ */
+export const INDEX_COMBO_INDEXES: readonly { symbol: string; name: string; color: string }[] = [
+  { symbol: 'sh000001', name: '上证指数', color: '#f59e0b' },
+  { symbol: 'sz399001', name: '深证成指', color: '#3b82f6' },
+  { symbol: 'sh000300', name: '沪深300', color: '#a855f7' },
+  { symbol: 'sh000688', name: '科创50', color: '#14b8a6' },
+  { symbol: 'sz399006', name: '创业板指', color: '#ec4899' },
+];
+
 // ---------- 页面文案（源自宿主 futures.constants.ts FUTURES_PAGE_TEXT） ----------
 
 /** 页面常驻文案（数据边界 / 口径提醒 / 风险提示，规范要求不可隐藏） */
