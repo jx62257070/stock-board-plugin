@@ -34,9 +34,11 @@ const VIEW_WIDTH = 960;
 /** 画布内边距（左留 y 轴刻度、右留标注空间） */
 const PAD = { left: 70, right: 34, top: 34, bottom: 30 } as const;
 
-/** 窗口内月 K（升序；不足两根时父组件显示占位文案，本组件不渲染） */
+/** 窗口内月 K（升序；end 为 null（进行中轮次）时延伸到最新一根；不足两根时父组件显示占位文案，本组件不渲染） */
 const windowBars = computed(() =>
-  props.bars.filter((bar) => bar.month >= props.round.window.start && bar.month <= props.round.window.end),
+  props.bars.filter(
+    (bar) => bar.month >= props.round.window.start && bar.month <= (props.round.window.end ?? '9999-12'),
+  ),
 );
 
 /**

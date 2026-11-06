@@ -12,7 +12,7 @@ export const HISTORY_REVIEW_PLUGIN_ID = 'dsh-history-review';
 export const HISTORY_REVIEW_PLUGIN_NAME = '历史牛熊复盘';
 
 /** 插件版本（与 manifest.json 保持一致，构建时校验） */
-export const HISTORY_REVIEW_PLUGIN_VERSION = '1.0.0';
+export const HISTORY_REVIEW_PLUGIN_VERSION = '1.1.0';
 
 /** 左侧导航菜单路径 */
 export const HISTORY_REVIEW_MENU_PATH = '/history-review';
@@ -28,6 +28,12 @@ export const HISTORY_REVIEW_SNAPSHOT_KEY = 'review-snapshot';
 
 /** 同一上游连续请求的错峰间隔（毫秒）—— 频率红线 */
 export const BULL_SYNC_DELAY_MS = 500;
+
+/**
+ * 快照自动重同步阈值（毫秒）：进页时快照比该阈值旧就静默重拉一次月 K，
+ * 保证「进行中」轮次的数据延伸到当前（正式同步仍走手动按钮 + 串行错峰）
+ */
+export const HISTORY_REVIEW_AUTO_RESYNC_MS = 12 * 60 * 60 * 1000;
 
 /** 行情图容器高度（像素） */
 export const BULL_CHART_HEIGHT_PX = 320;

@@ -326,7 +326,7 @@ export const BULL_ROUNDS: readonly ReviewRoundMeta[] = [
     collapseType: 'B',
     collapseLabel: 'B 类·2026.7 崩盘',
     status: '已瓦解（2026.7）',
-    window: { start: '2024-09', peak: '2026-06', end: '2026-09' },
+    window: { start: '2024-09', peak: '2026-06', end: null },
     span: '2024.09 – 至今',
     mainline: 'AI 算力 / 半导体',
     midCaps: '中际旭创、寒武纪、海光信息',

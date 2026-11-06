@@ -75,8 +75,11 @@ export interface ReviewRoundMeta {
   collapseLabel: string;
   /** 状态（已瓦解 / 进行中） */
   status: string;
-  /** 行情窗口：start 起点月 / peak 见顶（熊市为见底转折参考）月 / end 结束月（进行中轮次为当前月） */
-  window: { start: string; peak: string; end: string };
+  /**
+   * 行情窗口：start 起点月 / peak 见顶（熊市为见底转折参考）月 / end 结束月。
+   * `end: null` = 进行中轮次，窗口自动延伸到月 K 最新一根（数据与图表随同步推进）。
+   */
+  window: { start: string; peak: string; end: string | null };
   /** 统计区间展示文案（如 `2016.01 – 2022.04`） */
   span: string;
   /** 抱团主线（熊市 = 下跌主线） */

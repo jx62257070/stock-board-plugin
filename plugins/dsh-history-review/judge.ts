@@ -12,18 +12,22 @@ import type {
   ReviewRoundStats,
 } from './types';
 
+/** 窗口末月的哨兵值：`window.end: null`（进行中轮次）按「无限远」截取，实际止于月 K 最新一根 */
+const WINDOW_END_OPEN = '9999-12';
+
 /**
- * 截取月份区间内的月 K（含首尾）
+ * 截取月份区间内的月 K（含首尾；end 为 null（进行中轮次）时延伸到序列末尾）
  * @param bars 月 K 序列（升序）
  * @param startMonth 起始月（YYYY-MM，含）
- * @param endMonth 结束月（YYYY-MM，含）
+ * @param endMonth 结束月（YYYY-MM，含；null = 进行中轮次，取到最新）
  * @returns 区间内序列
  */
 export const sliceBarsInRange = (
   bars: readonly MonthlyBar[],
   startMonth: string,
-  endMonth: string,
-): MonthlyBar[] => bars.filter((bar) => bar.month >= startMonth && bar.month <= endMonth);
+  endMonth: string | null,
+): MonthlyBar[] =>
+  bars.filter((bar) => bar.month >= startMonth && bar.month <= (endMonth ?? WINDOW_END_OPEN));
 
 /**
  * 取收盘最高的月 K

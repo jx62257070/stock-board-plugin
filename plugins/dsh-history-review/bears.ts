@@ -287,7 +287,7 @@ export const BEAR_ROUNDS: readonly ReviewRoundMeta[] = [
     collapseType: 'A',
     collapseLabel: 'A 类·批量跌停急杀',
     status: '进行中',
-    window: { start: '2026-06', peak: '2026-09', end: '2026-09' },
+    window: { start: '2026-06', peak: '2026-09', end: null },
     span: '2026.07 – 至今',
     mainline: 'AI 算力 / 半导体抱团股集中回撤',
     midCaps: '中际旭创、寒武纪、海光信息（观察中军止跌信号）',

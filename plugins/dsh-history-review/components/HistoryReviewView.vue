@@ -16,6 +16,7 @@ import {
   BULL_VIEW_TABS,
   BULL_VIEW_TAB_DEFAULT,
   BULL_VIEW_TAB_LIBRARY,
+  HISTORY_REVIEW_AUTO_RESYNC_MS,
 } from '../constants';
 import type { ReviewRoundMeta, ReviewStageTone } from '../types';
 
@@ -156,8 +157,11 @@ const runSync = async (): Promise<void> => {
 };
 
 onMounted(() => {
-  // 库空才自动首拉；此后重进页面读库零联网
-  if (props.runtime.repo.snapshot().syncedAt === null) void runSync();
+  // 库空 → 首拉；快照超过 12h → 静默重同步（进行中轮次的数据跟到当前）；否则读库零联网
+  const syncedAt = props.runtime.repo.snapshot().syncedAt;
+  if (syncedAt === null || Date.now() - syncedAt > HISTORY_REVIEW_AUTO_RESYNC_MS) {
+    void runSync();
+  }
 });
 </script>
 
