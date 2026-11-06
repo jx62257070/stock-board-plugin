@@ -66,6 +66,24 @@ const RUNTIME_BRIDGE_KEY = '__WHF_PLUGIN_RUNTIME__';
 /** vite/rollup 产出的 vue 具名导入（`import { a, b as c } from 'vue';`） */
 const VUE_IMPORT = /^import\s*\{([^}]*)\}\s*from\s*["']vue["'];?[ \t]*$/gm;
 
+/** vite/rollup 产出的 echarts/core 具名导入（类型导入在编译期已被擦除，不会到这） */
+const ECHARTS_IMPORT = /^import\s*\{([^}]*)\}\s*from\s*["']echarts\/core["'];?[ \t]*$/gm;
+
+/**
+ * 运行时桥暴露的模块表：键 = 桥上的字段名，值 = 构建时外部化的裸模块名
+ *
+ * 插件产物不能有 import（宿主 Blob 动态 import 无模块解析），
+ * vue 与 echarts/core 都在打包后改写成「从桥取值」——与宿主共用同一实例。
+ * echarts 按需注册（charts / components / renderers 的 use()）由宿主 setup.ts
+ * 在挂桥前完成，插件只需 `import { init } from 'echarts/core'`。
+ */
+const BRIDGED_MODULES = [
+  { field: 'vue', specifier: 'vue', regex: VUE_IMPORT, fallback: '' },
+  // 旧宿主（< v1.16.0）桥上没有 echarts：取值时靠 `?? {}` 兜底成空对象，
+  // 具体降级（占位提示）由插件组件自行判断 init 是否为函数
+  { field: 'echarts', specifier: 'echarts/core', regex: ECHARTS_IMPORT, fallback: ' ?? {}' },
+];
+
 /** 任何残留 import（产物的红线：一个都不能有） */
 const ANY_IMPORT = /^\s*import\s+(?:[^'"\n]*?\bfrom\s+)?['"]([^'"]+)['"]/gm;
 
@@ -109,16 +127,19 @@ const toDestructuring = (names) =>
     .join(', ');
 
 /**
- * 把产物里的 vue import 换成「运行时桥取值」，并加上缺失桥时的明确报错
+ * 把产物里的桥接模块 import 换成「运行时桥取值」，并加上缺失桥时的明确报错
  * @param code 原始产物
  * @returns 改写后的产物
  */
-const bridgeVueImports = (code) => {
+const bridgeModuleImports = (code) => {
   let bridged = 0;
-  const out = code.replace(VUE_IMPORT, (_full, names) => {
-    bridged += 1;
-    return `const { ${toDestructuring(names)} } = ${RUNTIME_BRIDGE_KEY}.vue;`;
-  });
+  let out = code;
+  for (const { field, regex, fallback } of BRIDGED_MODULES) {
+    out = out.replace(regex, (_full, names) => {
+      bridged += 1;
+      return `const { ${toDestructuring(names)} } = ${RUNTIME_BRIDGE_KEY}.${field}${fallback};`;
+    });
+  }
   if (bridged === 0) {
     throw new Error('产物里没有 vue 导入：入口是否真的用到了 Vue？（SFC 编译后必然有一条）');
   }
@@ -127,7 +148,9 @@ const bridgeVueImports = (code) => {
     `if (!${RUNTIME_BRIDGE_KEY}?.vue) {`,
     `  throw new Error('宿主运行时桥不可用：${RUNTIME_BRIDGE_KEY}（插件必须在该版本宿主里安装）');`,
     `}`,
-    '',
+    `if (${RUNTIME_BRIDGE_KEY}.echarts !== undefined && !${RUNTIME_BRIDGE_KEY}.echarts?.init) {`,
+    `  throw new Error('宿主运行时桥的 echarts 不可用：请升级宿主到 v1.16.0 及以上');`,
+    `}`,
   ].join('\n');
   return `${guard}${out}`;
 };
@@ -173,11 +196,10 @@ const buildArtifact = async (target) => {
         fileName: () => 'main.js',
       },
       rollupOptions: {
-        // vue **必须外部化**：一旦被打进产物就是「第二份 Vue 实例」，
-        // 插件里的 ref 与宿主的组件树互不相认（响应式与渲染全崩）。
-        // 这里保留 `import … from 'vue'`，随后由 bridgeVueImports 改写成
-        // 从宿主运行时桥取值 —— 二者共用同一实例。
-        external: ['vue'],
+        // vue **必须外部化**：一旦被打进产物就是「第二份 Vue 实例」。
+        // echarts/core 同理外部化：宿主桥上已有按需注册好的同一模块，
+        // 打进来就是白担体积。二者随后由 bridgeModuleImports 改写成从桥取值。
+        external: ['vue', 'echarts/core'],
       },
     },
   });
@@ -194,7 +216,8 @@ const buildArtifact = async (target) => {
 const validateArtifact = async (id, code, manifest) => {
   const file = path.join(TMP, id, 'bridged.mjs');
   fs.writeFileSync(file, code, 'utf8');
-  (globalThis)[RUNTIME_BRIDGE_KEY] = { vue: vueRuntime };
+  const echartsModule = await import('echarts/core');
+  (globalThis)[RUNTIME_BRIDGE_KEY] = { vue: vueRuntime, echarts: echartsModule };
 
   const mod = await import(pathToFileURL(file).href);
   const definition = mod.default ?? mod.plugin;
@@ -288,7 +311,7 @@ const packTarget = async (target, hostRoot) => {
 
   process.stdout.write(`▸ ${id}：正在编译 …\n`);
   const raw = await buildArtifact(target);
-  const bridged = bridgeVueImports(raw);
+  const bridged = bridgeModuleImports(raw);
   assertNoImports(bridged, id);
 
   const definition = await validateArtifact(id, bridged, manifest);

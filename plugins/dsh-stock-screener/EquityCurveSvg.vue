@@ -1,21 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import type { EChartsCoreOption } from 'echarts/core';
 import { EQUITY_LEGEND_BUY_HOLD, EQUITY_LEGEND_STRATEGY } from './constants';
+import EChartBox from './EChartBox.vue';
+import { chartPalette, semanticColor, useChartThemeSignal } from './echarts-theme';
 
 /**
- * 回测权益曲线（纯 SVG 双线图，替代宿主 ECharts 版 EquityCurveChart）
+ * 回测权益曲线（ECharts 双线图，替代早期 SVG 手绘版）
  *
- * - 策略线颜色随涨跌语义（父组件算好 trend 类名传入，`currentColor` 跟随主题）；
- * - 买入持有基准为灰色虚线；无坐标轴刻度，仅保留首尾日期与图例，
- *   满足「形状对比」这一回测场景的核心诉求。
+ * - 策略线颜色随涨跌语义（父组件算好 trend 类名传入，运行时映射语义 CSS 变量取色）；
+ * - 买入持有基准为灰色虚线；带坐标轴与 hover tooltip（日期 + 策略 / 基准权益）。
  */
-
-/** SVG 视窗宽（像素，等比缩放） */
-const VIEW_WIDTH = 600;
-/** SVG 视窗高（像素，等比缩放） */
-const VIEW_HEIGHT = 220;
-/** 视窗内边距 */
-const PADDING = 8;
 
 const props = defineProps<{
   /** 日期序列 */
@@ -28,93 +23,103 @@ const props = defineProps<{
   strategyClass: string;
 }>();
 
-/** 全部曲线的取值范围（加 5% 余量，避免线贴边） */
-const valueRange = computed(() => {
-  const all = [...props.equityCurve, ...props.buyHoldCurve].filter((v) => Number.isFinite(v));
-  if (all.length === 0) {
-    return { min: 0, max: 1 };
-  }
-  const min = Math.min(...all);
-  const max = Math.max(...all);
-  const pad = (max - min) * 0.05 || Math.abs(max) * 0.01 || 1;
-  return { min: min - pad, max: max + pad };
-});
+/** 图表主题信号（html class / data-theme 变化时翻转，驱动 option 重算） */
+const themeSignal = useChartThemeSignal();
+
+/** 策略线颜色（text-up / text-down 类名 → 语义 CSS 变量取色） */
+const strategyColor = computed(() =>
+  props.strategyClass.includes('text-down')
+    ? semanticColor('--color-down', '#16a34a')
+    : semanticColor('--color-up', '#dc2626'),
+);
 
 /**
- * 曲线 → SVG polyline 的 points 串
- * @param curve 权益曲线
- * @returns `x,y x,y …`（x 均分视窗宽，y 按值域映射）
+ * tooltip 文本组装（日期 + 策略权益 + 基准权益，万元折算可读化）
+ * @param raw ECharts 透传的 formatter 参数（unknown 收敛）
+ * @returns HTML 文本
  */
-const toPoints = (curve: number[]): string => {
-  if (curve.length === 0) {
-    return '';
+const tooltipFormatter = (raw: unknown): string => {
+  interface TooltipParam {
+    axisValue?: string;
+    seriesName?: string;
+    value?: number | null;
   }
-  const { min, max } = valueRange.value;
-  const span = max - min || 1;
-  const innerW = VIEW_WIDTH - PADDING * 2;
-  const innerH = VIEW_HEIGHT - PADDING * 2;
-  const stepX = curve.length > 1 ? innerW / (curve.length - 1) : 0;
-  return curve
-    .map((value, index) => {
-      const x = PADDING + stepX * index;
-      const y = PADDING + innerH * (1 - (value - min) / span);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
+  const params = (Array.isArray(raw) ? raw : [raw]) as TooltipParam[];
+  const lines: string[] = [params[0]?.axisValue ?? ''];
+  for (const param of params) {
+    if (param.seriesName) {
+      lines.push(`${param.seriesName} ${(param.value ?? 0).toLocaleString('en-US')} 元`);
+    }
+  }
+  return lines.join('<br/>');
 };
 
-/** 策略线 points */
-const strategyPoints = computed(() => toPoints(props.equityCurve));
-/** 基准线 points */
-const buyHoldPoints = computed(() => toPoints(props.buyHoldCurve));
-
-/** 首个交易日（左下角标注） */
-const firstDate = computed(() => props.dates[0] ?? '');
-/** 最后交易日（右下角标注） */
-const lastDate = computed(() => props.dates.at(-1) ?? '');
+/** ECharts 配置（主题 / 数据变化时整体重算） */
+const option = computed<EChartsCoreOption | null>(() => {
+  if (props.equityCurve.length === 0) {
+    return null;
+  }
+  const isDark = themeSignal.value;
+  const palette = chartPalette(isDark);
+  return {
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: palette.tooltipBg,
+      borderColor: palette.tooltipBorder,
+      textStyle: { color: isDark ? '#dfe6ee' : '#3a4453', fontSize: 11 },
+      formatter: tooltipFormatter,
+    },
+    legend: {
+      data: [EQUITY_LEGEND_STRATEGY, EQUITY_LEGEND_BUY_HOLD],
+      textStyle: { color: palette.text, fontSize: 11 },
+      top: 0,
+    },
+    grid: { left: 8, right: 16, top: 28, bottom: 2, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: props.dates,
+      axisLabel: { color: palette.text, fontSize: 10 },
+      axisLine: { lineStyle: { color: palette.axisLine } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: {
+        color: palette.text,
+        fontSize: 10,
+        formatter: (value: number) => value.toLocaleString('en-US'),
+      },
+      splitLine: { lineStyle: { color: palette.splitLine } },
+    },
+    series: [
+      {
+        name: EQUITY_LEGEND_STRATEGY,
+        type: 'line',
+        data: props.equityCurve,
+        showSymbol: false,
+        lineStyle: { width: 1.5, color: strategyColor.value },
+        itemStyle: { color: strategyColor.value },
+        areaStyle: { opacity: 0.06, color: strategyColor.value },
+      },
+      {
+        name: EQUITY_LEGEND_BUY_HOLD,
+        type: 'line',
+        data: props.buyHoldCurve,
+        showSymbol: false,
+        lineStyle: { width: 1, type: 'dashed', color: palette.text },
+        itemStyle: { color: palette.text },
+      },
+    ],
+  };
+});
 </script>
 
 <template>
   <div class="space-y-2">
-    <div class="flex items-center gap-4 text-xs text-text-secondary">
-      <span class="flex items-center gap-1.5">
-        <span class="inline-block h-0.5 w-4 rounded" :class="strategyClass" />
-        {{ EQUITY_LEGEND_STRATEGY }}
-      </span>
-      <span class="flex items-center gap-1.5">
-        <span class="inline-block h-0.5 w-4 rounded border-t border-dashed border-current text-text-tertiary" />
-        {{ EQUITY_LEGEND_BUY_HOLD }}
-      </span>
-    </div>
-    <svg
-      :viewBox="`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`"
-      class="w-full"
-      role="img"
-      aria-label="回测权益曲线"
-    >
-      <g :class="strategyClass">
-        <polyline
-          :points="strategyPoints"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linejoin="round"
-          stroke-linecap="round"
-        />
-      </g>
-      <g class="text-text-tertiary">
-        <polyline
-          :points="buyHoldPoints"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1"
-          stroke-dasharray="4 3"
-        />
-      </g>
-    </svg>
-    <div class="flex items-center justify-between text-xs text-text-tertiary tabular-nums">
-      <span>{{ firstDate }}</span>
-      <span>{{ lastDate }}</span>
+    <div class="h-[220px] w-full" role="img" aria-label="回测权益曲线">
+      <EChartBox v-if="option" :options="option" />
     </div>
   </div>
 </template>

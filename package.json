@@ -29,6 +29,7 @@
     "@types/node": "^24.13.3",
     "@vitejs/plugin-vue": "^6.0.8",
     "dayjs": "^1.11.13",
+    "echarts": "^6.1.0",
     "eslint": "^10.10.0",
     "eslint-plugin-jsdoc": "^64.3.9",
     "eslint-plugin-vue": "^10.11.0",

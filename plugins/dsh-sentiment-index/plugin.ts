@@ -35,7 +35,7 @@ import type { PluginDefinition } from '../../host/types/plugin.types';
 export const sentimentPlugin: PluginDefinition = {
   id: SENTIMENT_PLUGIN_ID,
   name: SENTIMENT_MENU_TITLE,
-  version: '1.3.2',
+  version: '1.4.0',
   description:
     '题材热度 + 散户情绪双指数看板：板块成交额占全市场比重为热度锚点，东财小单资金拆分做散户提纯，'
     + '输出 0~100 双指数；价格-情绪-量能同图对照，背离标记一眼可见。打开页面不联网，采集更新用户点击触发。',

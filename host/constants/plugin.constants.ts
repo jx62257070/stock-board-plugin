@@ -106,7 +106,9 @@ export const PLUGIN_LOG_PREFIX = '[plugin]';
  * 产物的 vue 别名模块（打包时由 `scripts/build-plugins.mjs` 生成）从它取同一份实例，
  * 于是插件产物与宿主共用**唯一一个 Vue**，不会出现两份互不相通的响应式系统。
  *
- * 桥本身**只暴露 vue**（冻结对象、单一用途），不是给插件开的宿主能力后门。
+ * 桥暴露 **vue 与 echarts/core**（冻结对象）：vue 让插件产物与宿主共用唯一实例；
+ * echarts/core 让插件图表用宿主已按需注册的 ECharts（宿主 setup.ts 已提前 use()），
+ * 插件无需自带 ECharts 依赖。它不是给插件开的宿主能力后门 —— 能力走 ctx 服务容器。
  */
 export const PLUGIN_RUNTIME_BRIDGE_KEY = '__WHF_PLUGIN_RUNTIME__';
 

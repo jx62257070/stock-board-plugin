@@ -16,7 +16,7 @@ export const SCREENER_PLUGIN_ID = 'dsh-stock-screener';
 export const SCREENER_PLUGIN_NAME = '选股器';
 
 /** 插件版本（与 manifest.json 保持一致，构建脚本会校验） */
-export const SCREENER_PLUGIN_VERSION = '1.0.0';
+export const SCREENER_PLUGIN_VERSION = '1.1.0';
 
 /** 左侧导航菜单路径（沿用宿主内置版的历史路径，老书签直达） */
 export const SCREENER_MENU_PATH = '/screener';

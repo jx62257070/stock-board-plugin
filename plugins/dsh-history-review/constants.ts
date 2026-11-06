@@ -12,7 +12,7 @@ export const HISTORY_REVIEW_PLUGIN_ID = 'dsh-history-review';
 export const HISTORY_REVIEW_PLUGIN_NAME = '历史牛熊复盘';
 
 /** 插件版本（与 manifest.json 保持一致，构建时校验） */
-export const HISTORY_REVIEW_PLUGIN_VERSION = '1.1.0';
+export const HISTORY_REVIEW_PLUGIN_VERSION = '1.2.0';
 
 /** 左侧导航菜单路径 */
 export const HISTORY_REVIEW_MENU_PATH = '/history-review';

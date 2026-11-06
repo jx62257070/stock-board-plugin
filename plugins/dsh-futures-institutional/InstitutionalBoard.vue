@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import dayjs from 'dayjs';
+import type { EChartsCoreOption } from 'echarts/core';
+import EChartBox from './EChartBox.vue';
+import { chartPalette, semanticColor, useChartThemeSignal } from './echarts-theme';
 import {
   CCPM_EQUITY_PRODUCT_ORDER,
   CCPM_PRODUCTS,
@@ -40,7 +43,7 @@ import type {
  * 数据源：中金所 CCPM 成交持仓排名每日披露 CSV（GBK，仅 HTTP）。页面编排：
  * 筛选器（品种 / 三档合并口径 / 合约 / 交易日 / 席位搜索）→ 数据边界提示 →
  * 概览指标卡 → 上榜会员总表（行展开 = 席位跨合约分解）+ 席位画像 →
- * 多空并排柱状 + 净持仓时序（SVG 轻量图）→ 衍生榜单 → 移仓换月（折叠）→
+ * 多空并排柱状 + 净持仓时序（ECharts 图，主题经 CSS 变量取色）→ 衍生榜单 → 移仓换月（折叠）→
  * 固定风险提示。历史回填由「同步历史」按钮触发（一次性任务，非轮询）。
  */
 
@@ -767,8 +770,8 @@ watch(resolvedDay, () => {
   comboError.value = '';
 });
 
-/** 曲线对照 SVG 视窗与内边距（bar 左轴手数 / 线右轴百分比） */
-const COMBO_VIEW = { width: 900, height: 300, left: 56, right: 60, top: 28, bottom: 26 } as const;
+/** 图表主题信号（html class / data-theme 变化时翻转，驱动 option 重算） */
+const themeSignal = useChartThemeSignal();
 
 /** 曲线对照视图模型：日期轴 + 净增减柱 + 归一化曲线 */
 interface ComboChart {
@@ -843,90 +846,99 @@ const comboChart = computed<ComboChart | null>(() => {
 });
 
 /**
- * 曲线对照：x 坐标（第 i 个披露日 → 视窗像素）
- * @param index 披露日序号（从 0 起）
- * @param total 披露日总数
- * @returns 视窗内的 x 像素坐标
+ * 曲线对照：tooltip 文本组装（日期 + 净增减手数 + 各指数涨跌幅）
+ * @param raw ECharts 透传的 formatter 参数（unknown 收敛）
+ * @returns HTML 文本
  */
-const comboXOf = (index: number, total: number): number => {
-  const inner = COMBO_VIEW.width - COMBO_VIEW.left - COMBO_VIEW.right;
-  return COMBO_VIEW.left + (total <= 1 ? inner / 2 : (index / (total - 1)) * inner);
+const comboTooltipFormatter = (raw: unknown): string => {
+  interface TooltipParam {
+    axisValue?: string;
+    seriesName?: string;
+    value?: number | null;
+  }
+  const params = (Array.isArray(raw) ? raw : [raw]) as TooltipParam[];
+  const lines: string[] = [params[0]?.axisValue ?? ''];
+  for (const param of params) {
+    if (param.value === null || param.value === undefined || !Number.isFinite(param.value)) {
+      continue;
+    }
+    if (param.seriesName === '净增减（手）') {
+      lines.push(`净增减 ${param.value.toLocaleString('en-US')} 手`);
+    } else if (param.seriesName) {
+      lines.push(`${param.seriesName} ${param.value.toFixed(2)}%`);
+    }
+  }
+  return lines.join('<br/>');
 };
 
-/**
- * 曲线对照：柱状 y 几何（正值向上 / 负值向下，零线居中）
- * @param value 柱值（正 / 负）
- * @param index 披露日序号（从 0 起）
- * @param total 披露日总数
- * @param barMax 全序列柱值绝对值最大值（归一化基准）
- * @returns 柱矩形的 x / y / width / height（像素）
- */
-const comboBarRect = (value: number, index: number, total: number, barMax: number) => {
-  const innerH = COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom;
-  const zeroY = COMBO_VIEW.top + innerH / 2;
-  const half = innerH / 2 - 10;
-  const h = (Math.abs(value) / barMax) * half;
-  const step = (COMBO_VIEW.width - COMBO_VIEW.left - COMBO_VIEW.right) / Math.max(total, 1);
-  const width = Math.max(Math.min(14, step * 0.55), 2);
-  const x = comboXOf(index, total) - width / 2;
-  return value >= 0
-    ? { x, y: zeroY - h, height: Math.max(h, 0.5), width }
-    : { x, y: zeroY, height: Math.max(h, 0.5), width };
-};
-
-/**
- * 曲线对照：柱状零线 y（像素）
- * @returns 零线的 y 像素坐标
- */
-const comboZeroY = (): number => COMBO_VIEW.top + (COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom) / 2;
-
-/**
- * 曲线对照：百分比 → y 像素（右轴）
- * @param value 百分比值
- * @param pctMin 右轴下限（%）
- * @param pctMax 右轴上限（%）
- * @returns 视窗内的 y 像素坐标
- */
-const comboYOfPct = (value: number, pctMin: number, pctMax: number): number => {
-  const innerH = COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom;
-  const span = pctMax - pctMin || 1;
-  return COMBO_VIEW.top + innerH - ((value - pctMin) / span) * innerH;
-};
-
-/**
- * 曲线对照：指数折线的 points 属性
- * @param values 指数百分比序列（与披露日对齐）
- * @param pctMin 右轴下限（%）
- * @param pctMax 右轴上限（%）
- * @returns SVG points 属性字符串
- */
-const comboLinePoints = (values: number[], pctMin: number, pctMax: number): string =>
-  values
-    .map((value, index) => `${comboXOf(index, values.length).toFixed(1)},${comboYOfPct(value, pctMin, pctMax).toFixed(1)}`)
-    .join(' ');
-
-/** 曲线对照：x 轴日期刻度（首 / 1/2 / 3/4 / 末，最多 4 个防拥挤） */
-const comboXTicks = computed(() => {
+/** 曲线对照 ECharts 配置（双 y 轴：左净增减手数 / 右指数涨跌幅%） */
+const comboOption = computed<EChartsCoreOption | null>(() => {
   const chart = comboChart.value;
-  if (!chart) return [];
-  const total = chart.labels.length;
-  const picks = [0, Math.floor((total - 1) / 3), Math.floor(((total - 1) * 2) / 3), total - 1];
-  return [...new Set(picks)].map((index) => ({
-    x: comboXOf(index, total),
-    text: chart.labels[index] ?? '',
-  }));
-});
-
-/** 曲线对照：右轴百分比刻度（上 / 中 / 下） */
-const comboPctTicks = computed(() => {
-  const chart = comboChart.value;
-  if (!chart) return [];
-  const mid = (chart.pctMax + chart.pctMin) / 2;
-  return [
-    { value: chart.pctMax, text: `${chart.pctMax.toFixed(1)}%` },
-    { value: mid, text: `${mid.toFixed(1)}%` },
-    { value: chart.pctMin, text: `${chart.pctMin.toFixed(1)}%` },
-  ];
+  if (!chart) {
+    return null;
+  }
+  const isDark = themeSignal.value;
+  const palette = chartPalette(isDark);
+  const axisLabel = { color: palette.text, fontSize: 10 } as const;
+  return {
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: palette.tooltipBg,
+      borderColor: palette.tooltipBorder,
+      textStyle: { color: isDark ? '#dfe6ee' : '#3a4453', fontSize: 11 },
+      formatter: comboTooltipFormatter,
+    },
+    grid: { left: 8, right: 8, top: 18, bottom: 2, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: chart.labels,
+      axisLabel,
+      axisLine: { lineStyle: { color: palette.axisLine } },
+      axisTick: { show: false },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        name: '手',
+        nameTextStyle: { color: palette.text, fontSize: 10 },
+        min: -chart.barMax * 1.15,
+        max: chart.barMax * 1.15,
+        axisLabel: { ...axisLabel, formatter: (value: number) => value.toLocaleString('en-US') },
+        splitLine: { lineStyle: { color: palette.splitLine } },
+      },
+      {
+        type: 'value',
+        min: chart.pctMin,
+        max: chart.pctMax,
+        axisLabel: { ...axisLabel, formatter: (value: number) => `${value.toFixed(1)}%` },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: '净增减（手）',
+        type: 'bar',
+        data: chart.chgs.map((value) => ({
+          value,
+          itemStyle: {
+            color: value >= 0 ? semanticColor('--color-up', '#dc2626') : semanticColor('--color-down', '#16a34a'),
+            opacity: 0.85,
+          },
+        })),
+        barMaxWidth: 18,
+      },
+      ...chart.lines.map((line) => ({
+        name: line.name,
+        type: 'line',
+        yAxisIndex: 1,
+        data: line.values,
+        showSymbol: false,
+        lineStyle: { width: 1.6, color: line.color },
+        itemStyle: { color: line.color },
+      })),
+    ],
+  };
 });
 
 /** 柱状图取前 N 个席位 */
@@ -951,39 +963,145 @@ const barRows = computed(() => {
     .slice(0, BAR_CHART_TOP);
 });
 
-/** 柱状图的最大单侧值（归一化用） */
-const barMax = computed(() =>
-  Math.max(1, ...barRows.value.flatMap((row) => [row.buy, row.sell])),
-);
-
-/** 净持仓时序折线的极值（归一化用） */
-const seriesRange = computed(() => {
-  const points = series.value?.points ?? [];
-  if (points.length === 0) {
-    return { min: 0, max: 1 };
+/**
+ * 多空并排柱状：tooltip 文本组装（席位 + 多单 / 空单手数）
+ * @param raw ECharts 透传的 formatter 参数（unknown 收敛）
+ * @returns HTML 文本
+ */
+const barTooltipFormatter = (raw: unknown): string => {
+  interface TooltipParam {
+    axisValue?: string;
+    seriesName?: string;
+    value?: number | null;
   }
-  const values = points.map((p) => p.totalNet);
-  return { min: Math.min(...values, 0), max: Math.max(...values, 0) };
+  const params = (Array.isArray(raw) ? raw : [raw]) as TooltipParam[];
+  const lines: string[] = [params[0]?.axisValue ?? ''];
+  for (const param of params) {
+    if (param.seriesName) {
+      lines.push(`${param.seriesName} ${(param.value ?? 0).toLocaleString('en-US')} 手`);
+    }
+  }
+  return lines.join('<br/>');
+};
+
+/** 多空并排柱状 ECharts 配置（横向双系列：多单红 / 空单绿） */
+const barOption = computed<EChartsCoreOption | null>(() => {
+  if (barRows.value.length === 0) {
+    return null;
+  }
+  const isDark = themeSignal.value;
+  const palette = chartPalette(isDark);
+  // 横向 category 轴自下而上渲染，反转后榜首在最上
+  const rows = [...barRows.value].reverse();
+  return {
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      backgroundColor: palette.tooltipBg,
+      borderColor: palette.tooltipBorder,
+      textStyle: { color: isDark ? '#dfe6ee' : '#3a4453', fontSize: 11 },
+      formatter: barTooltipFormatter,
+    },
+    legend: {
+      data: ['多单', '空单'],
+      textStyle: { color: palette.text, fontSize: 11 },
+      top: 0,
+    },
+    grid: { left: 8, right: 44, top: 26, bottom: 2, containLabel: true },
+    xAxis: {
+      type: 'value',
+      axisLabel: { color: palette.text, fontSize: 10, formatter: (value: number) => value.toLocaleString('en-US') },
+      splitLine: { lineStyle: { color: palette.splitLine } },
+    },
+    yAxis: {
+      type: 'category',
+      data: rows.map((row) => row.name.slice(0, 10)),
+      axisLabel: { color: palette.text, fontSize: 11 },
+      axisLine: { lineStyle: { color: palette.axisLine } },
+      axisTick: { show: false },
+    },
+    series: [
+      {
+        name: '多单',
+        type: 'bar',
+        data: rows.map((row) => row.buy),
+        itemStyle: { color: semanticColor('--color-up', '#dc2626') },
+        barWidth: 7,
+      },
+      {
+        name: '空单',
+        type: 'bar',
+        data: rows.map((row) => row.sell),
+        itemStyle: { color: semanticColor('--color-down', '#16a34a') },
+        barWidth: 7,
+      },
+    ],
+  };
 });
 
 /**
- * 折线 SVG 路径（宽 300 高 80 视窗归一化）
- * @returns path d 属性；无数据为空串
+ * 净持仓时序：tooltip 文本组装（日期 + 净持仓手数）
+ * @param raw ECharts 透传的 formatter 参数（unknown 收敛）
+ * @returns HTML 文本
  */
-const seriesPath = computed<string>(() => {
+const seriesTooltipFormatter = (raw: unknown): string => {
+  interface TooltipParam {
+    axisValue?: string;
+    value?: number | null;
+  }
+  const params = (Array.isArray(raw) ? raw : [raw]) as TooltipParam[];
+  const value = params[0]?.value;
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return params[0]?.axisValue ?? '';
+  }
+  return `${params[0]?.axisValue ?? ''}<br/>净持仓 ${value.toLocaleString('en-US')} 手`;
+};
+
+/** 净持仓时序 ECharts 配置（线色随净多 / 净空语义：正红负绿） */
+const seriesOption = computed<EChartsCoreOption | null>(() => {
   const points = series.value?.points ?? [];
   if (points.length < 2) {
-    return '';
+    return null;
   }
-  const { min, max } = seriesRange.value;
-  const span = max - min || 1;
-  return points
-    .map((point, index) => {
-      const x = (index / (points.length - 1)) * 300;
-      const y = 80 - ((point.totalNet - min) / span) * 80;
-      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
+  const isDark = themeSignal.value;
+  const palette = chartPalette(isDark);
+  const latest = points[points.length - 1]?.totalNet ?? 0;
+  const lineColor = latest >= 0 ? semanticColor('--color-up', '#dc2626') : semanticColor('--color-down', '#16a34a');
+  return {
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: palette.tooltipBg,
+      borderColor: palette.tooltipBorder,
+      textStyle: { color: isDark ? '#dfe6ee' : '#3a4453', fontSize: 11 },
+      formatter: seriesTooltipFormatter,
+    },
+    grid: { left: 8, right: 12, top: 12, bottom: 2, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: points.map((point) => point.tradingDay.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')),
+      axisLabel: { color: palette.text, fontSize: 10 },
+      axisLine: { lineStyle: { color: palette.axisLine } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: { color: palette.text, fontSize: 10, formatter: (value: number) => value.toLocaleString('en-US') },
+      splitLine: { lineStyle: { color: palette.splitLine } },
+    },
+    series: [
+      {
+        name: '净持仓（手）',
+        type: 'line',
+        data: points.map((point) => point.totalNet),
+        showSymbol: false,
+        lineStyle: { width: 1.8, color: lineColor },
+        itemStyle: { color: lineColor },
+        areaStyle: { opacity: 0.08, color: lineColor },
+      },
+    ],
+  };
 });
 
 /** 披露交易日（yyyy-MM-dd，数据未就绪为空串） */
@@ -1439,22 +1557,15 @@ const runAiAnalysis = async (): Promise<void> => {
         </component>
       </div>
 
-      <!-- 多空并排柱状（纯 SVG，涨跌配色走语义类） -->
+      <!-- 多空并排柱状（ECharts 横向双系列，涨跌配色经 CSS 变量取语义色） -->
       <component
         :is="runtime.deps.ui.Card"
         :title="`多空并排柱状（|净持仓| 前 ${barRows.length}）`"
       >
-        <!-- SVG 视窗 800×230（10 行 × 23）：相对视窗的 12px 字号在全宽渲染下约 15px，与正文一致 -->
-        <svg viewBox="0 0 800 230" class="w-full">
-          <g v-for="(row, index) in barRows" :key="row.name" :transform="`translate(0, ${index * 23})`">
-            <text x="0" :y="15" class="fill-current text-text-secondary" font-size="12">{{ row.name.slice(0, 10) }}</text>
-            <rect x="170" :y="5" :width="(row.buy / barMax) * 380" height="6" class="fill-up" />
-            <rect x="170" :y="13" :width="(row.sell / barMax) * 380" height="6" class="fill-down" />
-            <text x="570" :y="15" class="fill-current text-text-tertiary tabular-nums" font-size="12">
-              {{ row.buy.toLocaleString('en-US') }} / {{ row.sell.toLocaleString('en-US') }}
-            </text>
-          </g>
-        </svg>
+        <!-- ECharts 横向双系列柱状（多单红 / 空单绿），高度随行数自适应 -->
+        <div v-if="barOption" :style="{ height: `${barRows.length * 34 + 40}px` }">
+          <EChartBox :options="barOption" not-merge />
+        </div>
       </component>
 
       <!-- 净持仓时序（app:ui Card，加载按钮入 extra 槽） -->
@@ -1473,12 +1584,8 @@ const runAiAnalysis = async (): Promise<void> => {
           </component>
         </template>
         <div v-if="series && series.points.length >= 2">
-          <svg viewBox="0 0 300 84" class="w-full">
-            <path :d="seriesPath" fill="none" class="stroke-up" stroke-width="1.5" />
-          </svg>
-          <div class="flex justify-between text-xs text-text-tertiary">
-            <span>{{ series.points[0]?.tradingDay }}</span>
-            <span>{{ series.points[series.points.length - 1]?.tradingDay }}</span>
+          <div class="h-[190px] w-full">
+            <EChartBox v-if="seriesOption" :options="seriesOption" />
           </div>
           <div v-if="selectedPartial" class="mt-1 text-xs text-up-strong">{{ FUTURES_PAGE_TEXT.partialWarn }}</div>
         </div>
@@ -1524,82 +1631,9 @@ const runAiAnalysis = async (): Promise<void> => {
               />{{ line.name }}（右轴·%）
             </span>
           </div>
-          <svg
-            :viewBox="`0 0 ${COMBO_VIEW.width} ${COMBO_VIEW.height}`"
-            class="w-full"
-            role="img"
-            aria-label="中信期货净增减柱状与大盘指数曲线对照图"
-          >
-            <!-- 净增减柱（先铺底层；涨红跌绿语义色随主题） -->
-            <rect
-              v-for="(chg, index) in comboChart.chgs"
-              :key="`bar-${index}`"
-              v-bind="comboBarRect(chg, index, comboChart.chgs.length, comboChart.barMax)"
-              :class="chg >= 0 ? 'fill-up' : 'fill-down'"
-              opacity="0.85"
-            />
-            <!-- 柱状零线 -->
-            <line
-              :x1="COMBO_VIEW.left"
-              :x2="COMBO_VIEW.width - COMBO_VIEW.right"
-              :y1="comboZeroY()"
-              :y2="comboZeroY()"
-              stroke="var(--color-flat)"
-              stroke-width="1"
-              stroke-dasharray="4 3"
-            />
-            <!-- 左轴（手）刻度 -->
-            <text
-              :x="COMBO_VIEW.left - 6"
-              :y="comboZeroY() - (COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom) / 2 + 14"
-              text-anchor="end"
-              font-size="10"
-              class="fill-current text-text-tertiary tabular-nums"
-            >+{{ comboChart.barMax.toLocaleString('en-US') }}</text>
-            <text
-              :x="COMBO_VIEW.left - 6"
-              :y="comboZeroY() + 3"
-              text-anchor="end"
-              font-size="10"
-              class="fill-current text-text-tertiary tabular-nums"
-            >0</text>
-            <text
-              :x="COMBO_VIEW.left - 6"
-              :y="comboZeroY() + (COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom) / 2"
-              text-anchor="end"
-              font-size="10"
-              class="fill-current text-text-tertiary tabular-nums"
-            >-{{ comboChart.barMax.toLocaleString('en-US') }}</text>
-            <!-- 右轴（%）刻度 -->
-            <text
-              v-for="tick in comboPctTicks"
-              :key="`pct-${tick.text}`"
-              :x="COMBO_VIEW.width - COMBO_VIEW.right + 6"
-              :y="comboYOfPct(tick.value, comboChart.pctMin, comboChart.pctMax) + 3"
-              font-size="10"
-              class="fill-current text-text-tertiary tabular-nums"
-            >{{ tick.text }}</text>
-            <!-- x 轴日期 -->
-            <text
-              v-for="tick in comboXTicks"
-              :key="`x-${tick.text}`"
-              :x="tick.x"
-              :y="COMBO_VIEW.height - 8"
-              text-anchor="middle"
-              font-size="10"
-              class="fill-current text-text-tertiary tabular-nums"
-            >{{ tick.text }}</text>
-            <!-- 指数曲线（叠在柱上层） -->
-            <polyline
-              v-for="line in comboChart.lines"
-              :key="line.name"
-              :points="comboLinePoints(line.values, comboChart.pctMin, comboChart.pctMax)"
-              fill="none"
-              :stroke="line.color"
-              stroke-width="1.6"
-              stroke-linejoin="round"
-            />
-          </svg>
+          <div class="h-[300px] w-full" role="img" aria-label="中信期货净增减柱状与大盘指数曲线对照图">
+            <EChartBox v-if="comboOption" :options="comboOption" />
+          </div>
           <p class="mt-1 text-xs leading-relaxed text-text-tertiary">
             柱 = 中信期货(代客) IF/IH/IC/IM 合并逐日净增减（买增减 − 空增减，左轴·手）；线 = 五大指数自窗口首日归一的涨跌幅（右轴·%，科创板口径为科创50）。
             净增减 ≠ 看多看空（含套保与跨期套利，见下方数据局限性）；对照仅呈现时间相关性。

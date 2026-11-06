@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import type { EChartsCoreOption } from 'echarts/core';
 import {
   BEAR_STAGE_CSS_VAR,
   BULL_CHART_HEIGHT_PX,
@@ -7,14 +8,16 @@ import {
 } from '../constants';
 import { buildBearStats, buildRoundStats } from '../judge';
 import type { MonthlyBar, ReviewRoundMeta } from '../types';
+import EChartBox from './EChartBox.vue';
+import { chartPalette, readCssVar, semanticColor, useChartThemeSignal } from './echarts-theme';
 
 /**
- * 行情四阶段图（SVG 手绘，替代宿主内置时代的 ECharts 版）
+ * 行情四阶段图（ECharts 渲染，替代早期 SVG 手绘版）
  *
- * 轮次窗口内的指数月 K 收盘折线，底层铺阶段色带（色带色与标注色全部运行时读
- * CSS 变量，随宿主主题 / 涨跌配色 / 明暗自动跟随，无需 JS 监听）；标注起点 /
- * 顶点 / 低点（熊市 = 顶部 / 低点），牛熊使用各自色板（`mode` 区分）。
- * 图为只读展示，无坐标轴交互——复盘读的是阶段结构，不是单点数值。
+ * 轮次窗口内的指数月 K 收盘折线，底层铺阶段色带（markArea，色值运行时读
+ * CSS 变量，随宿主主题 / 涨跌配色 / 明暗自动跟随）；标注起点 / 顶点 / 低点
+ * （熊市 = 顶部 / 低点）用 markPoint，牛熊使用各自色板（`mode` 区分）。
+ * hover 出 tooltip（月份 + 收盘 + 所处阶段）。
  */
 const props = withDefaults(
   defineProps<{
@@ -28,11 +31,8 @@ const props = withDefaults(
   { mode: 'bull' },
 );
 
-/** 视口宽（viewBox 逻辑宽，容器内等比缩放） */
-const VIEW_WIDTH = 960;
-
-/** 画布内边距（左留 y 轴刻度、右留标注空间） */
-const PAD = { left: 70, right: 34, top: 34, bottom: 30 } as const;
+/** 图表主题信号（html class / data-theme 变化时翻转，驱动 option 重算） */
+const themeSignal = useChartThemeSignal();
 
 /** 窗口内月 K（升序；end 为 null（进行中轮次）时延伸到最新一根；不足两根时父组件显示占位文案，本组件不渲染） */
 const windowBars = computed(() =>
@@ -48,198 +48,167 @@ const windowBars = computed(() =>
  */
 const formatClose = (close: number): string => (close >= 100 ? close.toFixed(0) : close.toFixed(2));
 
-/** y 值域（上下各留 4% 空隙） */
-const yRange = computed(() => {
-  const closes = windowBars.value.map((bar) => bar.close);
-  const min = Math.min(...closes);
-  const max = Math.max(...closes);
-  const span = max - min || max || 1;
-  return { min: min - span * 0.04, max: max + span * 0.04 };
-});
+/** 阶段色带的取色映射（牛 / 熊各自色板） */
+const stageVars = computed(() => (props.mode === 'bear' ? BEAR_STAGE_CSS_VAR : BULL_STAGE_CSS_VAR));
 
 /**
- * 月份 → x 坐标（按窗口内序号均分）
+ * 月份所处阶段的名称（tooltip 用；窗口外为空串）
  * @param month 月份（YYYY-MM）
- * @returns x 像素（窗口外月份钳位到边界）
+ * @returns 阶段名
  */
-const xOf = (month: string): number => {
-  const bars = windowBars.value;
-  let index = bars.findIndex((bar) => bar.month >= month);
-  if (index === -1) index = bars.length - 1;
-  const inner = VIEW_WIDTH - PAD.left - PAD.right;
-  return PAD.left + (bars.length <= 1 ? inner / 2 : (index / (bars.length - 1)) * inner);
-};
+const stageNameOf = (month: string): string =>
+  props.round.stages.find((stage) => month >= stage.start && month <= stage.end)?.name ?? '';
 
 /**
- * 收盘价 → y 坐标
- * @param close 收盘价
- * @returns y 像素
+ * 关键位标注点（牛市 = 起点 / 顶点 / 低点；熊市 = 顶部 / 低点；由月 K 回算）
  */
-const yOf = (close: number): number => {
-  const { min, max } = yRange.value;
-  const inner = BULL_CHART_HEIGHT_PX - PAD.top - PAD.bottom;
-  return PAD.top + inner - ((close - min) / (max - min)) * inner;
-};
-
-/** 收盘折线的点集（x,y 空格分隔） */
-const linePoints = computed(() =>
-  windowBars.value.map((bar) => `${xOf(bar.month).toFixed(1)},${yOf(bar.close).toFixed(1)}`).join(' '),
-);
-
-/** 阶段色带矩形（色值 = 阶段色调映射的 CSS 变量，随主题切换） */
-const stageBands = computed(() => {
-  const vars = props.mode === 'bear' ? BEAR_STAGE_CSS_VAR : BULL_STAGE_CSS_VAR;
-  return props.round.stages.map((stage) => ({
-    key: stage.name,
-    x: xOf(stage.start),
-    x2: xOf(stage.end),
-    fill: `var(${vars[stage.tone] ?? '--color-flat-weak'})`,
-    label: stage.name,
-  }));
-});
-
-/** y 轴刻度（4 条网格线 + 数值文案） */
-const yTicks = computed(() => {
-  const { min, max } = yRange.value;
-  return [0, 1 / 3, 2 / 3, 1].map((ratio) => {
-    const value = max - (max - min) * ratio;
-    return { y: yOf(value), text: formatClose(value) };
-  });
-});
-
-/** x 轴月份刻度（首 / 中 / 末 + 中间均分点，最多 6 个避免拥挤） */
-const xTicks = computed(() => {
-  const bars = windowBars.value;
-  if (bars.length < 2) return [];
-  const step = Math.max(1, Math.ceil((bars.length - 1) / 5));
-  const ticks: { x: number; text: string }[] = [];
-  for (let index = 0; index < bars.length; index += step) {
-    ticks.push({ x: xOf(bars[index]!.month), text: bars[index]!.month.slice(2) });
-  }
-  const last = bars[bars.length - 1]!;
-  if (ticks[ticks.length - 1]?.text !== last.month.slice(2)) {
-    ticks.push({ x: xOf(last.month), text: last.month.slice(2) });
-  }
-  return ticks;
-});
-
-/** 关键位标注（牛市 = 起点 / 顶点 / 低点；熊市 = 顶部 / 低点；由月 K 回算） */
 const annotations = computed(() => {
   const bars = windowBars.value;
   if (bars.length < 2) return [];
-  const list: { x: number; y: number; text: string; color: string }[] = [];
-  const first = bars[0]!;
   const isBear = props.mode === 'bear';
   const bearStats = isBear ? buildBearStats(props.bars, props.round) : null;
   const bullStats = isBear ? null : buildRoundStats(props.bars, props.round);
+  const list: { month: string; close: number; text: string; colorVar: string }[] = [];
+  const first = bars[0]!;
   list.push({
-    x: xOf(first.month),
-    y: yOf(first.close),
+    month: first.month,
+    close: first.close,
     text: `${isBear ? '顶部' : '起点'} ${formatClose(first.close)}`,
-    color: isBear ? 'var(--color-up-strong)' : 'var(--color-up-strong)',
+    colorVar: '--color-up-strong',
   });
   if (bullStats) {
     list.push({
-      x: xOf(bullStats.peakMonth),
-      y: yOf(bullStats.peakClose),
+      month: bullStats.peakMonth,
+      close: bullStats.peakClose,
       text: `顶点 ${formatClose(bullStats.peakClose)}`,
-      color: 'var(--color-up-strong)',
+      colorVar: '--color-up-strong',
     });
   }
   const troughMonth = bullStats?.troughMonth ?? bearStats?.troughMonth;
   const troughClose = bullStats?.troughClose ?? bearStats?.troughClose;
   if (troughMonth !== undefined && troughClose !== undefined) {
     list.push({
-      x: xOf(troughMonth),
-      y: yOf(troughClose),
-      text: `${isBear ? '低点' : '低点'} ${formatClose(troughClose)}`,
-      color: 'var(--color-down-strong)',
+      month: troughMonth,
+      close: troughClose,
+      text: `低点 ${formatClose(troughClose)}`,
+      colorVar: '--color-down-strong',
     });
   }
   return list;
 });
+
+/**
+ * tooltip 文本组装（月份 + 收盘 + 所处阶段）
+ * @param raw ECharts 透传的 formatter 参数（unknown 收敛）
+ * @returns HTML 文本
+ */
+const tooltipFormatter = (raw: unknown): string => {
+  interface TooltipParam {
+    axisValue?: string;
+    value?: number | null;
+  }
+  const params = (Array.isArray(raw) ? raw : [raw]) as TooltipParam[];
+  const value = params[0]?.value;
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return params[0]?.axisValue ?? '';
+  }
+  const stage = stageNameOf(params[0]?.axisValue ?? '');
+  const lines = [`${params[0]?.axisValue ?? ''} 收盘 ${formatClose(value)}`];
+  if (stage) lines.push(stage);
+  return lines.join('<br/>');
+};
+
+/** ECharts 配置（主题 / 数据 / 轮次切换时整体重算） */
+const option = computed<EChartsCoreOption | null>(() => {
+  const bars = windowBars.value;
+  if (bars.length < 2) {
+    return null;
+  }
+  const isDark = themeSignal.value;
+  const palette = chartPalette(isDark);
+  const lineColor = readCssVar('--color-primary') || '#3b82f6';
+  return {
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: palette.tooltipBg,
+      borderColor: palette.tooltipBorder,
+      textStyle: { color: isDark ? '#dfe6ee' : '#3a4453', fontSize: 11 },
+      formatter: tooltipFormatter,
+    },
+    grid: { left: 8, right: 16, top: 34, bottom: 6, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: bars.map((bar) => bar.month),
+      boundaryGap: false,
+      axisLabel: { color: palette.text, fontSize: 10, formatter: (value: string) => value.slice(2) },
+      axisLine: { lineStyle: { color: palette.axisLine } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: { color: palette.text, fontSize: 10, formatter: (value: number) => formatClose(value) },
+      splitLine: { lineStyle: { color: palette.splitLine } },
+    },
+    series: [
+      {
+        name: props.round.name,
+        type: 'line',
+        data: bars.map((bar) => bar.close),
+        showSymbol: false,
+        lineStyle: { width: 1.6, color: lineColor },
+        itemStyle: { color: lineColor },
+        // 阶段色带（底层；色值运行时读宿主 CSS 变量）
+        markArea: {
+          silent: true,
+          data: props.round.stages.map((stage) => [
+            {
+              xAxis: stage.start,
+              itemStyle: { color: readCssVar(stageVars.value[stage.tone] ?? '--color-flat-weak') || 'rgba(127,127,127,0.12)' },
+              label: {
+                show: true,
+                position: 'insideTop',
+                formatter: stage.name,
+                color: isDark ? '#dfe6ee' : '#3a4453',
+                fontSize: 11,
+                fontWeight: 600,
+              },
+            },
+            { xAxis: stage.end },
+          ]),
+        },
+        // 关键位标注（点 + 文案）
+        markPoint: {
+          silent: true,
+          symbol: 'circle',
+          symbolSize: 7,
+          label: {
+            show: true,
+            position: 'top',
+            fontSize: 10.5,
+            fontWeight: 600,
+            formatter: (param: { name?: string }) => param.name ?? '',
+          },
+          data: annotations.value.map((item) => ({
+            name: item.text,
+            coord: [item.month, item.close],
+            itemStyle: { color: semanticColor(item.colorVar, '#dc2626') },
+          })),
+        },
+      },
+    ],
+  };
+});
 </script>
 
 <template>
-  <svg
-    :viewBox="`0 0 ${VIEW_WIDTH} ${BULL_CHART_HEIGHT_PX}`"
+  <div
     class="w-full"
     :style="{ height: `${BULL_CHART_HEIGHT_PX}px` }"
     role="img"
     :aria-label="`${round.name} 行情四阶段图`"
   >
-    <!-- 阶段色带（先铺底层） -->
-    <rect
-      v-for="band in stageBands"
-      :key="band.key"
-      :x="band.x"
-      :y="PAD.top - 20"
-      :width="Math.max(band.x2 - band.x, 1)"
-      :height="BULL_CHART_HEIGHT_PX - PAD.top - PAD.bottom + 26"
-      :fill="band.fill"
-      rx="4"
-    />
-    <text
-      v-for="band in stageBands"
-      :key="`${band.key}-label`"
-      :x="band.x + 6"
-      :y="PAD.top - 6"
-      class="fill-current text-text"
-      font-size="11"
-      font-weight="600"
-    >
-      {{ band.label }}
-    </text>
-
-    <!-- y 轴网格线与刻度 -->
-    <g v-for="tick in yTicks" :key="tick.y">
-      <line
-        :x1="PAD.left"
-        :x2="VIEW_WIDTH - PAD.right"
-        :y1="tick.y"
-        :y2="tick.y"
-        stroke="var(--color-flat-weak)"
-        stroke-width="1"
-      />
-      <text :x="PAD.left - 6" :y="tick.y + 3" text-anchor="end" font-size="10" class="fill-current text-text-tertiary">
-        {{ tick.text }}
-      </text>
-    </g>
-
-    <!-- x 轴月份刻度 -->
-    <text
-      v-for="tick in xTicks"
-      :key="`${tick.text}-${tick.x}`"
-      :x="tick.x"
-      :y="BULL_CHART_HEIGHT_PX - 10"
-      text-anchor="middle"
-      font-size="10"
-      class="fill-current text-text-tertiary"
-    >
-      {{ tick.text }}
-    </text>
-
-    <!-- 收盘折线 -->
-    <polyline
-      :points="linePoints"
-      fill="none"
-      stroke="var(--color-primary)"
-      stroke-width="1.6"
-      stroke-linejoin="round"
-    />
-
-    <!-- 关键位标注：点 + 文案 -->
-    <g v-for="item in annotations" :key="`${item.x}-${item.text}`">
-      <circle :cx="item.x" :cy="item.y" r="3.2" :fill="item.color" />
-      <text
-        :x="Math.min(item.x + 6, VIEW_WIDTH - PAD.right - 60)"
-        :y="Math.max(item.y - 8, 12)"
-        font-size="10.5"
-        font-weight="600"
-        :fill="item.color"
-      >
-        {{ item.text }}
-      </text>
-    </g>
-  </svg>
+    <EChartBox v-if="option" :options="option" not-merge />
+  </div>
 </template>
