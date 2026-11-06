@@ -73,6 +73,7 @@ plugins/dsh-sentiment-index/
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| 1.3.2 | 2026-11-06 | 东财通道自检：王总反馈 app 内东财请求零成功，而发布版宿主未启用 devtools（Cargo 无 devtools feature）console 诊断不可见 —— 新增 em-diag 自检（桥就绪 / 桥内 JSONP push2his+push2 / app:http 直连，各打一发 lmt=1 级轻量真实请求），结果显示在页面内；em-bridge 暴露建桥细节（iframe load 是否触发 / 建桥耗时）。盘中实测：fflow daykline 就是逐日历史接口（BK1036 实测 120 行、2026-05-13 起、盘中末行为昨日），天然 T+1 口径 |
 | 1.3.1 | 2026-10-31 | 桥 iframe 换载 quote.eastmoney.com：真机 E2E 实测 push2his 根路径 404 空响应（text/plain 0 字节）在 WebView2 渲染为错误页、initialization script 不执行 → 桥永远不就绪；补桥就绪超时 / iframe 已载未就绪的诊断日志（devtools 可见） |
 | 1.3.0 | 2026-10-31 | 东财 JSONP 桥 + 快照自积累：push2 系 WAF 按「浏览器 TLS 指纹 + 东财域 Referer」拒连 reqwest（实测两日 0 成功），新增 em-bridge 传输层（隐藏 iframe 承载东财页 + 宿主 4.32.0 注入桥脚本代发 JSONP，postMessage 回传，桥缺席回退 app:http；push2ex 池子仍走 http）；新增 clist 四档资金快照通道（每天 1~2 请求拉全板块主力/小单净额与净占比，落库自建历史，与 fflow 历史接口互相独立、当日值以快照覆盖）；fflow 串行车道维持探测/冷却/熔断纪律，桥可用日恢复 121 日回补 |
 | 1.2.0 | 2026-10-31 | 东财 fflow 采集链路对齐上游实测频率红线：拆出串行慢车道（前置探测 + 1.2s 间隔 + 首拒冷却 20s + 连续 2 次连拒熔断跳过剩余板块），替换 3 并发 × 500ms 连发（实测自我触发封禁窗口、整轮 0/20 全拒）；接线原死代码 probeEmFflow 并修复其 lmt 重复参数；修复缺席横幅分子颠倒（全部缺席曾显示「0/20 缺席」） |

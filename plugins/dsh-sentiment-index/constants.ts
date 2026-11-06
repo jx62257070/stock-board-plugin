@@ -229,6 +229,17 @@ export const EM_BRIDGE_ROUTE_HOSTS: readonly string[] = [
   'push2delay.eastmoney.com',
 ];
 
+// ---------- 东财通道自检（em-diag，页面内可读诊断） ----------
+
+/** 自检按钮文案 */
+export const EM_DIAG_BUTTON_TEXT = '东财通道自检';
+
+/** 自检运行中按钮文案 */
+export const EM_DIAG_RUNNING_TEXT = '自检中…';
+
+/** 自检结果卡标题 */
+export const EM_DIAG_CARD_TITLE = '东财通道自检结果';
+
 // ---------- 请求与节流 ----------
 
 /** 同一上游 URL 的原地重试次数（含首次；东财掐连接呈瞬时簇，稍等自愈） */

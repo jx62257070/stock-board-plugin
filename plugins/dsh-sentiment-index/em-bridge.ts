@@ -55,6 +55,9 @@ let lastDiagnostic = '';
 /** 桥空闲自动拆除定时器（每次桥活动重置） */
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** 最近一次建桥过程中 iframe 是否触发过 load 事件（自检诊断用；dispose 不清空） */
+let lastIframeLoadFired = false;
+
 /** 重置空闲拆除倒计时（每次建桥 / 每次请求都算活动） */
 const bumpIdleTimer = (): void => {
   if (idleTimer) clearTimeout(idleTimer);
@@ -177,6 +180,7 @@ const ensureEmBridge = async (): Promise<boolean> => {
     };
     // 诊断：iframe 文档加载完成却迟迟无 ready ≈ 宿主没注入桥脚本（版本过旧）
     iframe.addEventListener('load', () => {
+      lastIframeLoadFired = true;
       setTimeout(() => {
         if (!ready) {
           console.warn(
@@ -190,9 +194,30 @@ const ensureEmBridge = async (): Promise<boolean> => {
     activeIframe = iframe;
     activeHandler = onMessage;
     window.addEventListener('message', onMessage);
+    lastIframeLoadFired = false;
     (document.body ?? document.documentElement).appendChild(iframe);
   });
   return ensuring;
+};
+
+/** 桥就绪自检结果（em-diag 东财通道自检用） */
+export interface EmBridgeEnsureDetail {
+  /** 是否就绪 */
+  ok: boolean;
+  /** 建桥总耗时（毫秒，含等待 ready / 超时；桥已就绪时 ≈ 0） */
+  elapsedMs: number;
+  /** 期间 iframe 是否触发过 load 事件（false + 未就绪 = 页面加载被拦或失败） */
+  loadFired: boolean;
+}
+
+/**
+ * 建桥并返回可展示的细节（em-diag 自检用；与 ensureEmBridge 共享同一缓存语义）
+ * @returns 建桥细节
+ */
+export const ensureEmBridgeWithDetail = async (): Promise<EmBridgeEnsureDetail> => {
+  const startedAt = Date.now();
+  const ok = await ensureEmBridge();
+  return { ok, elapsedMs: Date.now() - startedAt, loadFired: lastIframeLoadFired };
 };
 
 /**

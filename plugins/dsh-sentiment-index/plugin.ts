@@ -35,7 +35,7 @@ import type { PluginDefinition } from '../../host/types/plugin.types';
 export const sentimentPlugin: PluginDefinition = {
   id: SENTIMENT_PLUGIN_ID,
   name: SENTIMENT_MENU_TITLE,
-  version: '1.3.1',
+  version: '1.3.2',
   description:
     '题材热度 + 散户情绪双指数看板：板块成交额占全市场比重为热度锚点，东财小单资金拆分做散户提纯，'
     + '输出 0~100 双指数；价格-情绪-量能同图对照，背离标记一眼可见。打开页面不联网，采集更新用户点击触发。',
@@ -45,6 +45,7 @@ export const sentimentPlugin: PluginDefinition = {
   // 1.2.0 fflow 串行慢车道：前置探测 + 1.2s 间隔 + 连拒熔断（对齐东财实测频率红线）
   // 1.3.0 东财 JSONP 桥（宿主 4.32.0 注入）+ clist 四档快照自积累：绕开 WAF 指纹封杀
   // 1.3.1 桥 iframe 换 quote.eastmoney.com（404 空响应在 WebView2 是错误页、init script 不执行）+ 就绪失败可诊断日志
+  // 1.3.2 东财通道自检：桥就绪 / 桥内 JSONP / app:http 直连三段实测，结果页面内可读（发布版无 devtools）
   devices: ['pc', 'mobile'],
   apply: async (ctx) => {
     // 宿主能力一次性取齐后沿调用链注入 —— 单文件产物形态下没有 import 可用，

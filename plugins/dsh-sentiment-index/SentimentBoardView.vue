@@ -44,6 +44,9 @@ import {
   WATCH_MODAL_FOOTER_NOTICE,
   WATCH_MODAL_TITLE,
   WATCH_SEARCH_PLACEHOLDER,
+  EM_DIAG_BUTTON_TEXT,
+  EM_DIAG_CARD_TITLE,
+  EM_DIAG_RUNNING_TEXT,
   indexPillKey,
   intradayNotice,
   staleBadgeText,
@@ -56,6 +59,8 @@ import {
   resolveStaleDays,
 } from './judge';
 import { runScan } from './scan';
+import { runEmChannelSelfTest } from './em-diag';
+import type { EmDiagResult } from './em-diag';
 import type { SentimentRepo } from './storage';
 import type {
   ChartMode,
@@ -352,6 +357,32 @@ const onScan = async (): Promise<void> => {
 /** 失败清单（上次采集遗留） */
 const failures = computed<readonly ScanFailure[]>(() => meta.value?.failures ?? []);
 
+// ---------- 东财通道自检 ----------
+
+/** 自检运行中 */
+const diagRunning = ref(false);
+/** 自检结果（null = 尚未运行 / 已收起） */
+const diagResult = ref<EmDiagResult | null>(null);
+
+/**
+ * 运行东财通道自检（真实轻量请求，结果显示在页面内 —— 发布版无 devtools，
+ * console 诊断不可见，诊断必须产品内可读）
+ */
+const onEmDiag = async (): Promise<void> => {
+  if (diagRunning.value || scanning.value) return;
+  diagRunning.value = true;
+  try {
+    diagResult.value = await runEmChannelSelfTest(props.deps);
+  } catch (error) {
+    diagResult.value = {
+      steps: [],
+      summary: `自检本身异常：${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    diagRunning.value = false;
+  }
+};
+
 /**
  * 重试单个失败板块（只重跑失败板块，不整轮重扫）
  * @param failure 失败记录
@@ -638,6 +669,14 @@ const rowKey = (row: RankRow): string => row.code;
             <component :is="deps.ui.Icon" name="refresh" :size="14" />
             {{ scanning ? SCAN_BUTTON_RUNNING : SCAN_BUTTON_TEXT }}
           </component>
+          <component
+            :is="deps.ui.Button"
+            variant="ghost"
+            :disabled="scanning || diagRunning"
+            @click="onEmDiag"
+          >
+            {{ diagRunning ? EM_DIAG_RUNNING_TEXT : EM_DIAG_BUTTON_TEXT }}
+          </component>
           <span v-if="progress" class="text-[11px] tabular-nums text-text-tertiary">
             {{ SCAN_STEP_LABEL[progress.step] }} {{ progress.done }}/{{ progress.total }}
           </span>
@@ -652,6 +691,46 @@ const rowKey = (row: RankRow): string => row.code;
         </span>
         <span v-if="meta">上次采集：{{ formatScannedAt(meta.scannedAt) }}</span>
         <span>情绪历史深度：{{ MAX_HISTORY_DAYS }} 日内（fflow 上游约 121 日）</span>
+      </div>
+
+      <!-- 东财通道自检结果（发布版无 devtools，桥 / 回退诊断必须页面内可读） -->
+      <div
+        v-if="diagResult"
+        class="mt-3 rounded-lg border border-flat bg-bg px-3 py-2.5 text-xs leading-relaxed"
+      >
+        <div class="flex items-center justify-between gap-2">
+          <span class="font-semibold text-text-secondary">{{ EM_DIAG_CARD_TITLE }}</span>
+          <component
+            :is="deps.ui.Button"
+            variant="ghost"
+            :disabled="diagRunning"
+            @click="diagResult = null"
+          >
+            收起
+          </component>
+        </div>
+        <div class="mt-2 space-y-1.5">
+          <div v-for="step in diagResult.steps" :key="step.label" class="flex items-start gap-2">
+            <span
+              class="w-4 shrink-0 text-center font-bold"
+              :class="
+                step.ok === true
+                  ? 'text-primary'
+                  : step.ok === false
+                    ? 'text-up'
+                    : 'text-text-tertiary'
+              "
+            >{{ step.ok === true ? '✓' : step.ok === false ? '✗' : '–' }}</span>
+            <span class="min-w-0 flex-1">
+              <span class="font-medium text-text-secondary">{{ step.label }}</span>
+              <span class="ml-1 tabular-nums text-text-tertiary">
+                {{ (step.elapsedMs / 1000).toFixed(1) }}s
+              </span>
+              <span class="block text-text-tertiary">{{ step.detail }}</span>
+            </span>
+          </div>
+        </div>
+        <p class="mt-2 border-t border-flat pt-2 text-text-secondary">{{ diagResult.summary }}</p>
       </div>
 
       <!-- 采集进度卡：五步分段 + 步内比例 + 当前单元（按 UI 稿 A3 形态） -->
