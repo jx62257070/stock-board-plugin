@@ -7,6 +7,7 @@ import {
   CCPM_SCOPE_LABELS,
   FUTURES_PAGE_TEXT,
   FUTURES_INSTITUTIONAL_PLUGIN_ID,
+  INDEX_COMBO_INDEXES,
 } from './constants';
 import type { CcpmProductCode } from './constants';
 import {
@@ -18,11 +19,13 @@ import {
   filterCcpmRowsByInstrument,
 } from './compute';
 import { buildCcpmAnalysisPrompt } from './prompt';
+import { fetchIndexCloses } from './index-kline';
 import { syncHistory } from './scan';
 import type { TableColumn } from '../../host/types/table.types';
 import type {
   CcpmAggregateRow,
   CcpmAnalysisDataset,
+  CcpmMemberDayPoint,
   CcpmMemberRow,
   CcpmMemberSeries,
   CcpmMemberStats,
@@ -712,6 +715,220 @@ const rollEntries = computed(() => (dayData.value ? computeCcpmRollEntries(dayDa
 /** 移仓面板是否展开（默认收起） */
 const rollExpanded = ref(false);
 
+/** 曲线对照数据：中信期货逐日净增减 + 各指数日 K 收盘表（symbol → date → close） */
+const combo = ref<{
+  points: CcpmMemberDayPoint[];
+  closes: Record<string, Map<string, number>>;
+} | null>(null);
+
+/** 曲线对照加载中 */
+const comboLoading = ref(false);
+
+/** 曲线对照失败文案（空串 = 无错误） */
+const comboError = ref('');
+
+/**
+ * 加载曲线对照数据：中信期货(代客) 全股指合并逐日净增减（CCPM 时序）
+ * + 五大指数日 K 收盘表（腾讯源，会话缓存），供同一画布对照
+ */
+const loadCombo = async (): Promise<void> => {
+  if (comboLoading.value || !resolvedDay.value) {
+    return;
+  }
+  comboLoading.value = true;
+  comboError.value = '';
+  try {
+    const [series, ...closeMaps] = await Promise.all([
+      props.runtime.data.fetchMemberSeries(
+        DEFAULT_MEMBER,
+        CCPM_EQUITY_PRODUCT_ORDER,
+        resolvedDay.value,
+      ),
+      ...INDEX_COMBO_INDEXES.map((ref) =>
+        fetchIndexCloses(props.runtime.deps.http, ref.symbol),
+      ),
+    ]);
+    const closes: Record<string, Map<string, number>> = {};
+    INDEX_COMBO_INDEXES.forEach((ref, index) => {
+      closes[ref.symbol] = closeMaps[index] ?? new Map();
+    });
+    combo.value = { points: series.points, closes };
+  } catch (error) {
+    combo.value = null;
+    comboError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    comboLoading.value = false;
+  }
+};
+
+// 披露日切换后旧对照数据作废
+watch(resolvedDay, () => {
+  combo.value = null;
+  comboError.value = '';
+});
+
+/** 曲线对照 SVG 视窗与内边距（bar 左轴手数 / 线右轴百分比） */
+const COMBO_VIEW = { width: 900, height: 300, left: 56, right: 60, top: 28, bottom: 26 } as const;
+
+/** 曲线对照视图模型：日期轴 + 净增减柱 + 归一化曲线 */
+interface ComboChart {
+  /** 披露日标签（MM/DD） */
+  labels: string[];
+  /** 净增减（手，与 labels 对齐） */
+  chgs: number[];
+  /** 柱状刻度上限（|净增减| 最大值） */
+  barMax: number;
+  /** 指数曲线（颜色 / 名称 / 归一化涨跌幅 % 点列，与 labels 对齐） */
+  lines: { name: string; color: string; values: number[] }[];
+  /** 线轴（%）上下界 */
+  pctMin: number;
+  pctMax: number;
+}
+
+/** 曲线对照图表数据（数据不足两个披露日时为 null，视图显示空态） */
+const comboChart = computed<ComboChart | null>(() => {
+  const data = combo.value;
+  if (!data || data.points.length < 2) {
+    return null;
+  }
+  // CCPM 交易日为 yyyyMMdd，腾讯 K 线日期为 yyyy-MM-dd，统一成后者查表
+  const dateKeys = data.points.map(
+    (point) => `${point.tradingDay.slice(0, 4)}-${point.tradingDay.slice(4, 6)}-${point.tradingDay.slice(6, 8)}`,
+  );
+  const chgs = data.points.map((point) => point.totalNetChg);
+  const barMax = Math.max(1, ...chgs.map((value) => Math.abs(value)));
+
+  const lines: ComboChart['lines'] = [];
+  for (const ref of INDEX_COMBO_INDEXES) {
+    const map = data.closes[ref.symbol];
+    // 窗口首日收盘为归一基准；首日缺席（极少数日历错位）时顺延到首个有收盘的交易日
+    let base: number | undefined = map?.get(dateKeys[0] ?? '');
+    if (base === undefined) {
+      for (const key of dateKeys) {
+        const close = map?.get(key);
+        if (close !== undefined) {
+          base = close;
+          break;
+        }
+      }
+    }
+    if (!map || base === undefined || base <= 0) {
+      continue;
+    }
+    // 逐日前向填充（节假日两侧日历一致，缺数据时沿用上一收盘，保证线不断）
+    const values: number[] = [];
+    let last = base;
+    for (const key of dateKeys) {
+      const close = map.get(key) ?? last;
+      last = close;
+      values.push(((close / base) - 1) * 100);
+    }
+    lines.push({ name: ref.name, color: ref.color, values });
+  }
+  if (lines.length === 0) {
+    return null;
+  }
+  const allPct = lines.flatMap((line) => line.values);
+  const pctRawMin = Math.min(...allPct);
+  const pctRawMax = Math.max(...allPct);
+  const pctPad = Math.max((pctRawMax - pctRawMin) * 0.08, 0.3);
+  return {
+    labels: dateKeys.map((key) => key.slice(5).replace('-', '/')),
+    chgs,
+    barMax,
+    lines,
+    pctMin: pctRawMin - pctPad,
+    pctMax: pctRawMax + pctPad,
+  };
+});
+
+/**
+ * 曲线对照：x 坐标（第 i 个披露日 → 视窗像素）
+ * @param index 披露日序号（从 0 起）
+ * @param total 披露日总数
+ * @returns 视窗内的 x 像素坐标
+ */
+const comboXOf = (index: number, total: number): number => {
+  const inner = COMBO_VIEW.width - COMBO_VIEW.left - COMBO_VIEW.right;
+  return COMBO_VIEW.left + (total <= 1 ? inner / 2 : (index / (total - 1)) * inner);
+};
+
+/**
+ * 曲线对照：柱状 y 几何（正值向上 / 负值向下，零线居中）
+ * @param value 柱值（正 / 负）
+ * @param index 披露日序号（从 0 起）
+ * @param total 披露日总数
+ * @param barMax 全序列柱值绝对值最大值（归一化基准）
+ * @returns 柱矩形的 x / y / width / height（像素）
+ */
+const comboBarRect = (value: number, index: number, total: number, barMax: number) => {
+  const innerH = COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom;
+  const zeroY = COMBO_VIEW.top + innerH / 2;
+  const half = innerH / 2 - 10;
+  const h = (Math.abs(value) / barMax) * half;
+  const step = (COMBO_VIEW.width - COMBO_VIEW.left - COMBO_VIEW.right) / Math.max(total, 1);
+  const width = Math.max(Math.min(14, step * 0.55), 2);
+  const x = comboXOf(index, total) - width / 2;
+  return value >= 0
+    ? { x, y: zeroY - h, height: Math.max(h, 0.5), width }
+    : { x, y: zeroY, height: Math.max(h, 0.5), width };
+};
+
+/**
+ * 曲线对照：柱状零线 y（像素）
+ * @returns 零线的 y 像素坐标
+ */
+const comboZeroY = (): number => COMBO_VIEW.top + (COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom) / 2;
+
+/**
+ * 曲线对照：百分比 → y 像素（右轴）
+ * @param value 百分比值
+ * @param pctMin 右轴下限（%）
+ * @param pctMax 右轴上限（%）
+ * @returns 视窗内的 y 像素坐标
+ */
+const comboYOfPct = (value: number, pctMin: number, pctMax: number): number => {
+  const innerH = COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom;
+  const span = pctMax - pctMin || 1;
+  return COMBO_VIEW.top + innerH - ((value - pctMin) / span) * innerH;
+};
+
+/**
+ * 曲线对照：指数折线的 points 属性
+ * @param values 指数百分比序列（与披露日对齐）
+ * @param pctMin 右轴下限（%）
+ * @param pctMax 右轴上限（%）
+ * @returns SVG points 属性字符串
+ */
+const comboLinePoints = (values: number[], pctMin: number, pctMax: number): string =>
+  values
+    .map((value, index) => `${comboXOf(index, values.length).toFixed(1)},${comboYOfPct(value, pctMin, pctMax).toFixed(1)}`)
+    .join(' ');
+
+/** 曲线对照：x 轴日期刻度（首 / 1/2 / 3/4 / 末，最多 4 个防拥挤） */
+const comboXTicks = computed(() => {
+  const chart = comboChart.value;
+  if (!chart) return [];
+  const total = chart.labels.length;
+  const picks = [0, Math.floor((total - 1) / 3), Math.floor(((total - 1) * 2) / 3), total - 1];
+  return [...new Set(picks)].map((index) => ({
+    x: comboXOf(index, total),
+    text: chart.labels[index] ?? '',
+  }));
+});
+
+/** 曲线对照：右轴百分比刻度（上 / 中 / 下） */
+const comboPctTicks = computed(() => {
+  const chart = comboChart.value;
+  if (!chart) return [];
+  const mid = (chart.pctMax + chart.pctMin) / 2;
+  return [
+    { value: chart.pctMax, text: `${chart.pctMax.toFixed(1)}%` },
+    { value: mid, text: `${mid.toFixed(1)}%` },
+    { value: chart.pctMin, text: `${chart.pctMin.toFixed(1)}%` },
+  ];
+});
+
 /** 柱状图取前 N 个席位 */
 const BAR_CHART_TOP = 10;
 
@@ -1266,6 +1483,132 @@ const runAiAnalysis = async (): Promise<void> => {
           <div v-if="selectedPartial" class="mt-1 text-xs text-up-strong">{{ FUTURES_PAGE_TEXT.partialWarn }}</div>
         </div>
         <div v-else class="text-xs text-text-tertiary">点「加载时序」拉取该席位近 20 个披露日的合并净持仓（自动落本地缓存）</div>
+      </component>
+
+      <!-- 中信期货净增减 × 大盘指数 曲线对照（柱 = CCPM 净增减左轴；线 = 指数归一化涨跌幅右轴） -->
+      <component
+        :is="runtime.deps.ui.Card"
+        :title="`中信期货净增减 × 大盘指数（全股指合并 · 近 ${comboChart?.labels.length ?? combo?.points.length ?? 0} 个披露日）`"
+      >
+        <template #extra>
+          <component
+            :is="runtime.deps.ui.Button"
+            variant="ghost"
+            :disabled="comboLoading || !resolvedDay"
+            @click="void loadCombo()"
+          >
+            {{ comboLoading ? '加载中…' : (combo ? '刷新' : '加载对照曲线') }}
+          </component>
+        </template>
+        <div v-if="comboError" class="rounded-lg bg-up-weak px-3 py-2 text-xs text-up">
+          加载失败：{{ comboError }}（可再次点击重试）
+        </div>
+        <template v-else-if="comboChart">
+          <!-- 图例（HTML 渲染，色块与折线同色） -->
+          <div class="mb-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-secondary">
+            <span class="flex items-center gap-1.5">
+              <i class="inline-block h-2.5 w-2.5 rounded-sm bg-up" aria-hidden="true" />净增减为正（增仓，左轴·手）
+            </span>
+            <span class="flex items-center gap-1.5">
+              <i class="inline-block h-2.5 w-2.5 rounded-sm bg-down" aria-hidden="true" />净增减为负（减仓，左轴·手）
+            </span>
+            <span
+              v-for="line in comboChart.lines"
+              :key="line.name"
+              class="flex items-center gap-1.5"
+            >
+              <i
+                class="inline-block h-0.5 w-4 rounded-full"
+                :style="{ backgroundColor: line.color }"
+                aria-hidden="true"
+              />{{ line.name }}（右轴·%）
+            </span>
+          </div>
+          <svg
+            :viewBox="`0 0 ${COMBO_VIEW.width} ${COMBO_VIEW.height}`"
+            class="w-full"
+            role="img"
+            aria-label="中信期货净增减柱状与大盘指数曲线对照图"
+          >
+            <!-- 净增减柱（先铺底层；涨红跌绿语义色随主题） -->
+            <rect
+              v-for="(chg, index) in comboChart.chgs"
+              :key="`bar-${index}`"
+              v-bind="comboBarRect(chg, index, comboChart.chgs.length, comboChart.barMax)"
+              :class="chg >= 0 ? 'fill-up' : 'fill-down'"
+              opacity="0.85"
+            />
+            <!-- 柱状零线 -->
+            <line
+              :x1="COMBO_VIEW.left"
+              :x2="COMBO_VIEW.width - COMBO_VIEW.right"
+              :y1="comboZeroY()"
+              :y2="comboZeroY()"
+              stroke="var(--color-flat)"
+              stroke-width="1"
+              stroke-dasharray="4 3"
+            />
+            <!-- 左轴（手）刻度 -->
+            <text
+              :x="COMBO_VIEW.left - 6"
+              :y="comboZeroY() - (COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom) / 2 + 14"
+              text-anchor="end"
+              font-size="10"
+              class="fill-current text-text-tertiary tabular-nums"
+            >+{{ comboChart.barMax.toLocaleString('en-US') }}</text>
+            <text
+              :x="COMBO_VIEW.left - 6"
+              :y="comboZeroY() + 3"
+              text-anchor="end"
+              font-size="10"
+              class="fill-current text-text-tertiary tabular-nums"
+            >0</text>
+            <text
+              :x="COMBO_VIEW.left - 6"
+              :y="comboZeroY() + (COMBO_VIEW.height - COMBO_VIEW.top - COMBO_VIEW.bottom) / 2"
+              text-anchor="end"
+              font-size="10"
+              class="fill-current text-text-tertiary tabular-nums"
+            >-{{ comboChart.barMax.toLocaleString('en-US') }}</text>
+            <!-- 右轴（%）刻度 -->
+            <text
+              v-for="tick in comboPctTicks"
+              :key="`pct-${tick.text}`"
+              :x="COMBO_VIEW.width - COMBO_VIEW.right + 6"
+              :y="comboYOfPct(tick.value, comboChart.pctMin, comboChart.pctMax) + 3"
+              font-size="10"
+              class="fill-current text-text-tertiary tabular-nums"
+            >{{ tick.text }}</text>
+            <!-- x 轴日期 -->
+            <text
+              v-for="tick in comboXTicks"
+              :key="`x-${tick.text}`"
+              :x="tick.x"
+              :y="COMBO_VIEW.height - 8"
+              text-anchor="middle"
+              font-size="10"
+              class="fill-current text-text-tertiary tabular-nums"
+            >{{ tick.text }}</text>
+            <!-- 指数曲线（叠在柱上层） -->
+            <polyline
+              v-for="line in comboChart.lines"
+              :key="line.name"
+              :points="comboLinePoints(line.values, comboChart.pctMin, comboChart.pctMax)"
+              fill="none"
+              :stroke="line.color"
+              stroke-width="1.6"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <p class="mt-1 text-xs leading-relaxed text-text-tertiary">
+            柱 = 中信期货(代客) IF/IH/IC/IM 合并逐日净增减（买增减 − 空增减，左轴·手）；线 = 五大指数自窗口首日归一的涨跌幅（右轴·%，科创板口径为科创50）。
+            净增减 ≠ 看多看空（含套保与跨期套利，见下方数据局限性）；对照仅呈现时间相关性。
+          </p>
+        </template>
+        <div v-else class="py-4 text-xs text-text-tertiary">
+          点「加载对照曲线」拉取中信期货(代客)全股指合并的逐日净增减（近 20 个披露日，自动落本地缓存），
+          与上证 / 深证成指 / 沪深300 / 科创50 / 创业板指的归一化涨跌幅曲线同画布对照。
+        </div>
       </component>
 
       <!-- 衍生榜单（app:ui Card；三榜一行平铺，min-w-0 防 nowrap 内容把网格列撑爆） -->
