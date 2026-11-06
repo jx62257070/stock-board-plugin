@@ -16,7 +16,10 @@ export const DAPANYUNTU_PLUGIN_ID = 'dsh-dapanyuntu';
 export const DAPANYUNTU_PLUGIN_NAME = '大盘云图';
 
 /** 插件版本（与 manifest.json 保持一致，构建脚本会校验） */
-export const DAPANYUNTU_PLUGIN_VERSION = '1.0.0';
+export const DAPANYUNTU_PLUGIN_VERSION = '1.1.0';
+
+/** 侧栏菜单图标（MenuIcon 的 key，与原市场总览页头按钮同款） */
+export const DAPANYUNTU_MENU_ICON = 'cloud';
 
 /** 页面路由路径（沿用宿主内置页的历史路径，老书签直达；宿主删自带页后由本插件接管） */
 export const DAPANYUNTU_ROUTE_PATH = '/heatmap';

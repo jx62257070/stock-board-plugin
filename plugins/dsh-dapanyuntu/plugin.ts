@@ -1,15 +1,17 @@
 /**
  * 插件 dsh-dapanyuntu（大盘云图）· 入口
  *
- * 注册隐藏路由页面（自宿主内置页迁移，路径沿用 /heatmap，2026-10-29 转插件分发）：
+ * 注册侧边栏菜单页（自宿主内置页迁移，路径沿用 /heatmap，2026-10-29 转插件分发）：
  * dapanyuntu.com 第三方云图 iframe 直嵌 + 明暗主题 postMessage 跟随 + 「访问原站」外链。
  * 无数据层、无持久化——宿主 Rust 侧 HEATMAP_THEME_INIT_SCRIPT 按域名注入、
  * 不感知页面承载者，插件页照常生效；未安装本插件时宿主入口落到 404 兜底页。
  *
- * 入口不变：市场总览页头「大盘云图」按钮与「板块热力」卡标题（宿主 ROUTE_PATH.HEATMAP）。
+ * 入口（2026-10-31 迁移）：侧边栏「插件」分组「大盘云图」（group 缺省即归该组）；
+ * 市场总览「板块热力」卡标题仍指向 /heatmap，宿主页头按钮已随入口迁移一并移除。
  */
 import DapanyuntuView from './DapanyuntuView.vue';
 import {
+  DAPANYUNTU_MENU_ICON,
   DAPANYUNTU_PAGE_TITLE,
   DAPANYUNTU_PLUGIN_ID,
   DAPANYUNTU_PLUGIN_NAME,
@@ -43,21 +45,24 @@ export const dapanyuntuPlugin: PluginDefinition = {
   name: DAPANYUNTU_PLUGIN_NAME,
   version: DAPANYUNTU_PLUGIN_VERSION,
   description:
-    '注册「大盘云图」整页（市场总览页头按钮进入，路径 /heatmap）：第三方站点 dapanyuntu.com 的'
+    '注册「大盘云图」整页（侧边栏「插件」分组进入，路径 /heatmap）：第三方站点 dapanyuntu.com 的'
     + ' A 股板块 / 个股树图直嵌展示，数据与交互均由原站提供；桌面端明暗主题自动跟随'
     + '（依赖宿主注入脚本），并提供「访问原站」入口。无本地数据，卸载即干净移除。',
   author: '内置',
   apply: (ctx) => {
     const deps = buildDeps(ctx);
 
-    ctx.router.add({
+    // 侧边栏「插件」分组入口（group 缺省即归该组，与散户情绪指数同构）；
+    // 带 component 的 menu.add 自动注册 /heatmap 布局子路由，老书签直达不受影响
+    ctx.menu.add({
       path: DAPANYUNTU_ROUTE_PATH,
+      title: DAPANYUNTU_PAGE_TITLE,
+      icon: DAPANYUNTU_MENU_ICON,
       component: DapanyuntuView,
       props: { deps },
-      meta: { title: DAPANYUNTU_PAGE_TITLE },
     });
 
-    ctx.logger.info('已注册「大盘云图」页面路由（/heatmap，主题跟随 + 原站外链）');
+    ctx.logger.info('已注册「大盘云图」侧栏菜单与页面（/heatmap，主题跟随 + 原站外链）');
   },
 };
 
