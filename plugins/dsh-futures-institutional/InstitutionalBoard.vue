@@ -607,14 +607,6 @@ const signed = (value: number | null): string =>
   value === null ? '--' : `${value > 0 ? '+' : ''}${value.toLocaleString('en-US')}`;
 
 /**
- * 净增减胶囊类（弱色底 + 语义文字色，口径同宿主 Tag 胶囊）
- * @param value 数值
- * @returns 类名
- */
-const chgPillClass = (value: number): string =>
-  value > 0 ? 'bg-up-weak text-up' : value < 0 ? 'bg-down-weak text-down' : 'bg-flat-weak text-text-secondary';
-
-/**
  * 百分比文案（保留一位小数，null 显 --）
  * @param value 百分数数值
  * @returns 文案
@@ -1433,23 +1425,25 @@ const runAiAnalysis = async (): Promise<void> => {
           :title="`席位画像${selectedMember ? ` · ${selectedMember}` : ''}`"
         >
           <template v-if="profile">
-            <!-- 净持仓 hero：大号数字锚点 + 净增减胶囊 -->
+            <!-- 净增减 hero：大号数字锚点（左）+ 净持仓次级展示（右） -->
             <div class="flex items-start justify-between gap-2">
               <div class="min-w-0">
-                <div class="text-sm font-medium text-text-tertiary">净持仓（手）</div>
+                <div class="text-sm font-medium text-text-tertiary">净增减（手）</div>
                 <div
                   class="mt-1.5 text-3xl leading-none font-bold tracking-tight tabular-nums"
+                  :class="profile.netChg === null ? 'text-text-tertiary' : signClass(profile.netChg)"
+                >
+                  {{ signed(profile.netChg) }}
+                </div>
+              </div>
+              <div class="shrink-0 text-right">
+                <div class="text-sm font-medium text-text-tertiary">净持仓（手）</div>
+                <div
+                  class="mt-1.5 text-lg leading-none font-semibold tabular-nums"
                   :class="signClass(profile.net)"
                 >
                   {{ signed(profile.net) }}
                 </div>
-              </div>
-              <div
-                v-if="profile.netChg !== null"
-                class="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium tabular-nums"
-                :class="chgPillClass(profile.netChg)"
-              >
-                净增减 {{ signed(profile.netChg) }}
               </div>
             </div>
 
@@ -1538,18 +1532,20 @@ const runAiAnalysis = async (): Promise<void> => {
               </div>
             </div>
 
-            <!-- 其余上榜会员对照 -->
-            <div v-if="others" class="mt-2 flex items-baseline justify-between gap-2 text-xs">
-              <span class="min-w-0 truncate text-text-tertiary">其余 {{ othersCount }} 家上榜汇总</span>
-              <span
-                class="shrink-0 font-medium tabular-nums"
-                :class="signClass(others.net)"
-              >
-                净 {{ others.net.toLocaleString('en-US') }}
-              </span>
-            </div>
+            <!-- 其余上榜会员对照 + 判定规则：上方分格线，净字号对齐上方净增减 hero -->
+            <div class="mt-3 border-t border-flat-weak pt-3">
+              <div v-if="others" class="flex items-baseline justify-between gap-2">
+                <span class="min-w-0 truncate text-sm text-text-tertiary">其余 {{ othersCount }} 家上榜汇总</span>
+                <span
+                  class="shrink-0 text-3xl leading-none font-bold tracking-tight tabular-nums"
+                  :class="signClass(others.net)"
+                >
+                  净 {{ others.net.toLocaleString('en-US') }}
+                </span>
+              </div>
 
-            <div class="mt-2 text-xs leading-relaxed text-text-tertiary">{{ FUTURES_PAGE_TEXT.tagRule }}</div>
+              <div class="mt-2 text-xs leading-relaxed text-text-tertiary">{{ FUTURES_PAGE_TEXT.tagRule }}</div>
+            </div>
           </template>
           <div v-else class="py-8 text-center text-xs text-text-tertiary">
             点击左侧总表席位行，查看该席位的多空画像与行为判定
