@@ -336,7 +336,7 @@ export const BULL_ROUNDS: readonly ReviewRoundMeta[] = [
       { name: '启动期', start: '2024-09', end: '2025-03', tone: 's1', desc: '海外映射 + 国产替代叙事启动' },
       { name: '发酵主升', start: '2025-03', end: '2026-02', tone: 's2', desc: '业绩兑现（光模块等），机构持续超配' },
       { name: '高潮鱼尾', start: '2026-02', end: '2026-06', tone: 's3', desc: '小票乱飞、中军滞涨、板块成交不再新高、核心股间歇大跌' },
-      { name: '退潮期', start: '2026-06', end: '2026-09', tone: 's4', desc: '兑现不及预期 → 集体大阴线，批量跌停' },
+      { name: '退潮期', start: '2026-06', end: '2026-10', tone: 's4', desc: '兑现不及预期 → 集体大阴线，批量跌停，2026-10 收盘见低点 2414 后收尾' },
     ],
     events: [
       { date: '2024.09', title: '「924」行情启动', detail: '国新办发布会降准降息 + 互换便利 / 回购增持再贷款，政治局会议加码，指数放量暴涨', kind: 'landed', category: 'policy' },
