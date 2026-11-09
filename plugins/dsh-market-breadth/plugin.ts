@@ -18,6 +18,7 @@ import {
   BREADTH_PLUGIN_NAME,
   BREADTH_PLUGIN_VERSION,
 } from './constants';
+import { createIndexKlineFetchers } from './index-kline';
 import { createBreadthSdk, createFullMarketFetcher } from './sdk';
 import { createBreadthRepo } from './storage';
 import type { PluginContext, PluginDefinition } from '../../host/types/plugin.types';
@@ -66,9 +67,11 @@ export const marketBreadthPlugin: PluginDefinition = {
     // 建表 + 水合完成后才注册页面（页面首屏直接读库渲染，不联网）
     const repo = await createBreadthRepo(ctx.db);
 
-    // 取数运行时：SDK 单例（fetchImpl 走宿主通道 + 东财镜像域改道），页面与 Agent 工具共用
+    // 取数运行时：SDK 单例（fetchImpl 走宿主通道 + 东财镜像域改道），页面与 Agent 工具共用；
+    // 指数 K 线取数器（腾讯日K / 新浪分时，均走宿主白名单通道）供「大盘指数」卡消费
     const runtime: BreadthRuntime = {
       fetchAllQuotes: createFullMarketFetcher(createBreadthSdk(http)),
+      ...createIndexKlineFetchers(http),
     };
 
     // Agent 工具：get_breadth_snapshot / get_breadth_history（只读）

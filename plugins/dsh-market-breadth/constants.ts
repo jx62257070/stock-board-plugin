@@ -16,7 +16,7 @@ export const BREADTH_PLUGIN_ID = 'dsh-market-breadth';
 export const BREADTH_PLUGIN_NAME = '市场宽度';
 
 /** 插件版本（与 manifest.json 保持一致，构建脚本会校验） */
-export const BREADTH_PLUGIN_VERSION = '1.2.0';
+export const BREADTH_PLUGIN_VERSION = '1.3.0';
 
 /** 左侧导航菜单路径（沿用宿主内置页的历史路径，老书签直达；宿主删自带页后由本插件接管） */
 export const BREADTH_MENU_PATH = '/market-breadth';
@@ -289,6 +289,75 @@ export const BREADTH_INDICATOR_INFO: Record<BreadthIndicatorKind, BreadthIndicat
       '市场交投活跃度的温度计，衡量有多少比例的股票被资金重点参与。占比持续走高：题材轮动加快、短线情绪升温；占比 ≥ 20%：交投过热，提防情绪退潮；占比 ≤ 5%：交投冰点，存量博弈。历史无法回填，自上线日起本地逐日积累。',
   },
 };
+
+// ---------- 大盘指数 K 线（分时 / 日K，参考宿主宽基 ETF 卡片形态） ----------
+
+/** 指数卡视图 key（分时 / 日K） */
+export const INDEX_KLINE_VIEW = {
+  /** 分时（当日 1 分钟线 + 均价线） */
+  MINUTE: 'minute',
+  /** 日K（蜡烛 + MA5/10/20 + 成交量） */
+  DAY: 'day',
+} as const;
+
+/** 指数卡视图 key 类型 */
+export type IndexKlineViewKey = (typeof INDEX_KLINE_VIEW)[keyof typeof INDEX_KLINE_VIEW];
+
+/** 指数卡视图选项（全页统一 分时 / 日K 切换） */
+export const INDEX_KLINE_VIEW_OPTIONS: ReadonlyArray<{ label: string; value: IndexKlineViewKey }> = [
+  { label: '分时', value: INDEX_KLINE_VIEW.MINUTE },
+  { label: '日K', value: INDEX_KLINE_VIEW.DAY },
+];
+
+/** 大盘指数卡条目 */
+export interface IndexKlineItem {
+  /** 指数符号（新浪 / 腾讯 K 线通用形态，如 `sh000001`） */
+  symbol: string;
+  /** 展示名 */
+  name: string;
+}
+
+/** 大盘指数卡条目集（声明顺序 = 展示顺序：上证 / 深证成指 / 创业板指 / 科创50） */
+export const INDEX_KLINE_ITEMS: readonly IndexKlineItem[] = [
+  { symbol: 'sh000001', name: '上证指数' },
+  { symbol: 'sz399001', name: '深证成指' },
+  { symbol: 'sz399006', name: '创业板指' },
+  { symbol: 'sh000688', name: '科创50' },
+];
+
+/** 腾讯指数日 K 接口（域在宿主 app:http 白名单 gtimg.cn 内；免 Token） */
+export const INDEX_DAY_KLINE_URL = 'https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get';
+
+/** 腾讯 K 线接口要求的 Referer */
+export const INDEX_DAY_KLINE_REFERER = 'https://gu.qq.com/';
+
+/** 日 K 请求根数（≈ 半年日线；卡片小图取半窗即可读，够算 MA20） */
+export const INDEX_DAY_KLINE_BARS = 120;
+
+/** 新浪 1 分钟线接口（域在白名单 sina.cn 内；同宿主宽基 ETF 分时口径） */
+export const INDEX_MINUTE_KLINE_URL =
+  'https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_=/CN_MarketDataService.getKLineData';
+
+/** 新浪上游要求的 Referer（缺失返回 403；Tauri 直连时必须自带） */
+export const INDEX_MINUTE_REFERER = 'https://finance.sina.com.cn';
+
+/** 新浪分钟线周期（1 分钟） */
+export const INDEX_MINUTE_SCALE = 1;
+
+/** 新浪分钟线请求根数（一天 240 根 + 余量；返回含少量昨日前缀，本地按日过滤） */
+export const INDEX_MINUTE_DATALEN = 320;
+
+/** 指数卡盘中刷新间隔（毫秒；轻量单标的请求，交易窗口外暂停） */
+export const INDEX_KLINE_POLL_MS = 60_000;
+
+/** 指数卡图表区高度（像素：主图 + 成交量副图） */
+export const INDEX_KLINE_CHART_HEIGHT_PX = 184;
+
+/** 日K均线周期组 */
+export const INDEX_KLINE_MA_PERIODS = [5, 10, 20] as const;
+
+/** 日K均线配色（MA5 / MA10 / MA20，亮暗两主题下均可读） */
+export const INDEX_KLINE_MA_COLORS = ['#f0a04b', '#5b8ff9', '#b47ae0'] as const;
 
 // ---------- MCP 工具参数 ----------
 

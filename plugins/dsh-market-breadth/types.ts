@@ -39,6 +39,44 @@ export interface BreadthRuntime {
    * @returns 全市场完整报价列表
    */
   fetchAllQuotes: () => Promise<FullQuote[]>;
+  /**
+   * 拉取单只大盘指数的日 K（腾讯源，时间升序；盘中最后一根为当日未定稿 bar）
+   * @param symbol 指数符号（`sh000001` 形态）
+   * @returns 日 K 序列
+   */
+  fetchIndexDayKline: (symbol: string) => Promise<IndexDayBar[]>;
+  /**
+   * 拉取单只大盘指数的当日 1 分钟线（新浪源，时间升序）
+   * @param symbol 指数符号（`sh000001` 形态）
+   * @returns 分钟点序列（仅当日）
+   */
+  fetchIndexMinuteLine: (symbol: string) => Promise<IndexMinutePoint[]>;
+}
+
+/** 大盘指数日 K bar（指数无复权概念，腾讯源原值） */
+export interface IndexDayBar {
+  /** 交易日（`YYYY-MM-DD`） */
+  date: string;
+  /** 开盘点位 */
+  open: number;
+  /** 最高点位 */
+  high: number;
+  /** 最低点位 */
+  low: number;
+  /** 收盘点位（盘中为最新价） */
+  close: number;
+  /** 成交量（手） */
+  volume: number;
+}
+
+/** 大盘指数分钟点（当日 1 分钟线采样） */
+export interface IndexMinutePoint {
+  /** 分钟时间（`HH:mm`，本地时区） */
+  time: string;
+  /** 分钟收盘点位 */
+  close: number;
+  /** 分钟成交量（手） */
+  volume: number;
 }
 
 /** 当日市场宽度统计（ARMS 为成交量口径，与通达信主流一致；自宿主复制） */

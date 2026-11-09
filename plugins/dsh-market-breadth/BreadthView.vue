@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import IndexKlineSection from './IndexKlineSection.vue';
 import SvgBreadthChart from './SvgBreadthChart.vue';
 import { buildBreadthAnalysisPrompt } from './prompt';
 import {
@@ -455,6 +456,10 @@ const runAiAnalysis = async (): Promise<void> => {
 
 <template>
   <div class="flex flex-col gap-3">
+    <!-- 大盘指数 K 线卡（上证 / 深证成指 / 创业板指 / 科创50，分时 / 日K 统一切换；
+         数据来自上游而非本地积累，不受下方「无积累数据」空态门控） -->
+    <IndexKlineSection :runtime="runtime" :deps="deps" />
+
     <component :is="deps.ui.Card" title="市场宽度 · 当日概览">
       <template #extra>
         <component :is="deps.ui.Tag" tone="primary">

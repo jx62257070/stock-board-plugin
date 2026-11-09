@@ -8,7 +8,8 @@ import { chartPalette, readCssVar, useChartThemeSignal } from './echarts-theme';
  * 市场宽度副图（ECharts 渲染，替代早期纯 SVG 手绘版）
  *
  * - 主线为主题色实线；可选均线为灰色虚线；可选基准线（ARMS y=1 / MCO y=0）为浅色虚线；
- * - 无坐标轴刻度（首尾日期与区间极值仍走下方标注行），hover 出 axis tooltip；
+ * - 坐标轴可见：x 轴为日期（MM-DD，自动抽稀防重叠），y 轴为数值刻度 + 浅色分隔线；
+ *   下方标注行只留区间高/低值；hover 出 axis tooltip；
  * - 主题跟随：颜色经 useChartThemeSignal 响应明暗 / 主题色切换后重算 option。
  */
 
@@ -95,9 +96,34 @@ const option = computed<EChartsCoreOption>(() => {
       textStyle: { color: isDark ? '#dfe6ee' : '#3a4453', fontSize: 11 },
       formatter: tooltipFormatter,
     },
-    grid: { left: 4, right: 4, top: 6, bottom: 4 },
-    xAxis: { type: 'category', data: [...props.dates], show: false },
-    yAxis: { type: 'value', show: false, min, max },
+    grid: { left: 4, right: 8, top: 8, bottom: 4, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: [...props.dates],
+      axisLine: { show: true, lineStyle: { color: palette.axisLine } },
+      axisTick: { show: false },
+      axisLabel: {
+        show: true,
+        color: palette.text,
+        fontSize: 10,
+        formatter: (value: string): string => value.slice(5),
+      },
+    },
+    yAxis: {
+      type: 'value',
+      show: true,
+      min,
+      max,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: {
+        show: true,
+        color: palette.text,
+        fontSize: 10,
+        formatter: (value: number): string => fmt.value(value),
+      },
+      splitLine: { show: true, lineStyle: { color: palette.splitLine } },
+    },
     series: [
       {
         type: 'line',
@@ -136,22 +162,17 @@ const option = computed<EChartsCoreOption>(() => {
   };
 });
 
-/** 区间最大值标注（右下标注行） */
+/** 区间最大值标注（下方标注行） */
 const maxLabel = computed(() => {
   if (mainValues.value.length === 0) return '';
   return fmt.value(Math.max(...mainValues.value));
 });
 
-/** 区间最小值标注（右下标注行） */
+/** 区间最小值标注（下方标注行） */
 const minLabel = computed(() => {
   if (mainValues.value.length === 0) return '';
   return fmt.value(Math.min(...mainValues.value));
 });
-
-/** 首个日期标注（左下） */
-const firstDate = computed(() => props.dates[0]?.slice(5) ?? '');
-/** 末个日期标注（右下） */
-const lastDate = computed(() => props.dates.at(-1)?.slice(5) ?? '');
 </script>
 
 <template>
@@ -159,11 +180,9 @@ const lastDate = computed(() => props.dates.at(-1)?.slice(5) ?? '');
     <div class="h-[150px] w-full" role="img" aria-label="市场宽度指标副图">
       <EChartBox :options="option" />
     </div>
-    <div class="flex items-center justify-between text-[10px] text-text-tertiary tabular-nums">
-      <span>{{ firstDate }}</span>
+    <div class="flex items-center justify-center gap-6 text-[10px] text-text-tertiary tabular-nums">
       <span>高 {{ maxLabel }}</span>
       <span>低 {{ minLabel }}</span>
-      <span>{{ lastDate }}</span>
     </div>
   </div>
 </template>
