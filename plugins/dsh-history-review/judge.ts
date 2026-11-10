@@ -1,52 +1,52 @@
 /**
  * 插件 dsh-bull-review（历史复盘）· 指标回算
  *
- * 全部是**纯函数**：输入月 K 序列与轮次档案，输出统计结果，不发请求、不碰库 ——
+ * 全部是**纯函数**：输入周 K 序列与轮次档案，输出统计结果，不发请求、不碰库 ——
  * 页面上所有数字（涨幅 / 回撤 / 时长）都从这里算出来，硬编码文案只做定性结论。
  * 月份统一用 `YYYY-MM` 字符串字典序比较，等价于时间先后。
  */
 import type {
-  MonthlyBar,
+  KlineBar,
   ReviewBearStats,
   ReviewRoundMeta,
   ReviewRoundStats,
 } from './types';
 
-/** 窗口末月的哨兵值：`window.end: null`（进行中轮次）按「无限远」截取，实际止于月 K 最新一根 */
+/** 窗口末月的哨兵值：`window.end: null`（进行中轮次）按「无限远」截取，实际止于周 K 最新一根 */
 const WINDOW_END_OPEN = '9999-12';
 
 /**
- * 截取月份区间内的月 K（含首尾；end 为 null（进行中轮次）时延伸到序列末尾）
- * @param bars 月 K 序列（升序）
+ * 截取月份区间内的周 K（含首尾；end 为 null（进行中轮次）时延伸到序列末尾）
+ * @param bars 周 K 序列（升序）
  * @param startMonth 起始月（YYYY-MM，含）
  * @param endMonth 结束月（YYYY-MM，含；null = 进行中轮次，取到最新）
  * @returns 区间内序列
  */
 export const sliceBarsInRange = (
-  bars: readonly MonthlyBar[],
+  bars: readonly KlineBar[],
   startMonth: string,
   endMonth: string | null,
-): MonthlyBar[] =>
+): KlineBar[] =>
   bars.filter((bar) => bar.month >= startMonth && bar.month <= (endMonth ?? WINDOW_END_OPEN));
 
 /**
- * 取收盘最高的月 K
- * @param bars 月 K 序列
- * @returns 顶点月 K；空序列为 undefined
+ * 取收盘最高的周 K
+ * @param bars 周 K 序列
+ * @returns 顶点周 K；空序列为 undefined
  */
-export const findPeakBar = (bars: readonly MonthlyBar[]): MonthlyBar | undefined =>
-  bars.reduce<MonthlyBar | undefined>(
+export const findPeakBar = (bars: readonly KlineBar[]): KlineBar | undefined =>
+  bars.reduce<KlineBar | undefined>(
     (best, bar) => (best === undefined || bar.close > best.close ? bar : best),
     undefined,
   );
 
 /**
- * 取收盘最低的月 K
- * @param bars 月 K 序列
- * @returns 低点月 K；空序列为 undefined
+ * 取收盘最低的周 K
+ * @param bars 周 K 序列
+ * @returns 低点周 K；空序列为 undefined
  */
-export const findTroughBar = (bars: readonly MonthlyBar[]): MonthlyBar | undefined =>
-  bars.reduce<MonthlyBar | undefined>(
+export const findTroughBar = (bars: readonly KlineBar[]): KlineBar | undefined =>
+  bars.reduce<KlineBar | undefined>(
     (best, bar) => (best === undefined || bar.close < best.close ? bar : best),
     undefined,
   );
@@ -76,14 +76,14 @@ export const countMonths = (fromMonth: string, toMonth: string): number => {
 /**
  * 回算一轮牛市行情的统计指标
  *
- * 起点 = 窗口内首根月 K；顶点 = `[start, peak]` 内收盘最高（peak 为硬编码的历史顶月，
+ * 起点 = 窗口内首根周 K；顶点 = `[start, peak]` 内收盘最高（peak 为硬编码的历史顶月，
  * 只用来圈定搜索范围，顶点月份以数据为准）；低点 = `[顶点月, end]` 内收盘最低。
- * @param bars 该轮叠加指数的全量月 K（升序）
+ * @param bars 该轮叠加指数的全量周 K（升序）
  * @param round 轮次档案
  * @returns 统计结果；窗口内数据不足两根时为 null
  */
 export const buildRoundStats = (
-  bars: readonly MonthlyBar[],
+  bars: readonly KlineBar[],
   round: ReviewRoundMeta,
 ): ReviewRoundStats | null => {
   const inWindow = sliceBarsInRange(bars, round.window.start, round.window.end);
@@ -115,14 +115,14 @@ export const buildRoundStats = (
 /**
  * 回算一轮熊市行情的统计指标
  *
- * 顶部 = 窗口起点首根月 K 的收盘（熊市从顶起算）；底部 = `[start, trough]` 内收盘最低
+ * 顶部 = 窗口起点首根周 K 的收盘（熊市从顶起算）；底部 = `[start, trough]` 内收盘最低
  * （trough 为硬编码的历史底月参考，只用来圈定搜索范围）；反弹 = 底部到窗口末之间的最高收盘。
- * @param bars 该轮叠加指数的全量月 K（升序）
+ * @param bars 该轮叠加指数的全量周 K（升序）
  * @param round 轮次档案
  * @returns 统计结果；窗口内数据不足两根时为 null
  */
 export const buildBearStats = (
-  bars: readonly MonthlyBar[],
+  bars: readonly KlineBar[],
   round: ReviewRoundMeta,
 ): ReviewBearStats | null => {
   const inWindow = sliceBarsInRange(bars, round.window.start, round.window.end);

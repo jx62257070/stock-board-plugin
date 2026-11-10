@@ -98,7 +98,7 @@ const metaItems = computed(() => [
 
 <template>
   <div>
-    <!-- 统计条：全部数字来自月 K 回算 -->
+    <!-- 统计条：全部数字来自周 K 回算 -->
     <div class="mb-3 grid grid-cols-2 gap-2 @xl:grid-cols-5">
       <div
         v-for="item in statItems"

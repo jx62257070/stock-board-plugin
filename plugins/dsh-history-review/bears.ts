@@ -8,7 +8,7 @@
  * 事件时间线按五类标注（龙头动向 / 国内政策 / 海外环境 / 资金情绪 / 产业业绩）。
  * ⚠️ 本轮科技崩盘熊（2026.7–）的近期事件来自用户复盘口径（豆包对话 2026-09-20），随行情推进补录。
  * ⚠️ 全部文字为复盘观点，仅供参考，不构成投资建议；
- * 跌幅 / 反弹等数字由 `judge.ts` 从月 K 回算，这里只写定性与时间窗。
+ * 跌幅 / 反弹等数字由 `judge.ts` 从周 K 回算，这里只写定性与时间窗。
  */
 import type { ReviewRoundMeta } from './types';
 
@@ -299,7 +299,7 @@ export const BEAR_ROUNDS: readonly ReviewRoundMeta[] = [
     ],
     events: [
       { date: '2026.07', title: '板块集体大阴线', detail: '批量跌停确认退潮，创业板指自 6 月顶点快速回撤', kind: 'landed', category: 'funds' },
-      { date: '2026.07', title: '自顶点回撤逾两成', detail: '月 K 口径自 4343 顶点回撤约 -23%（数据回算）', kind: 'landed', category: 'leader' },
+      { date: '2026.07', title: '自顶点回撤逾两成', detail: '周 K 口径自 4343 顶点回撤约 -23%（数据回算）', kind: 'landed', category: 'leader' },
       { date: '2026.08', title: '出清观察期', detail: '反弹乏力与修复交替；后续路径（磨底 / 反转）由数据说话，本页随行情推进补录', kind: 'expected', category: 'funds' },
     ],
     mismatch: [

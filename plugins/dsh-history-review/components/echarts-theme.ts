@@ -51,6 +51,8 @@ export interface ChartPalette {
   axisLine: string;
   /** 分隔线颜色 */
   splitLine: string;
+  /** 十字准线（axisPointer）线色 */
+  axisPointer: string;
   /** tooltip 背景色 */
   tooltipBg: string;
   /** tooltip 边框色 */
@@ -68,6 +70,7 @@ export const chartPalette = (isDark: boolean): ChartPalette =>
         text: '#9aa8ba',
         axisLine: '#2c3540',
         splitLine: '#232a33',
+        axisPointer: '#4a5866',
         tooltipBg: '#1f262e',
         tooltipBorder: '#2c3540',
       }
@@ -75,6 +78,7 @@ export const chartPalette = (isDark: boolean): ChartPalette =>
         text: '#5c6b80',
         axisLine: '#e5eaf0',
         splitLine: '#eef1f5',
+        axisPointer: '#b8c4d2',
         tooltipBg: '#ffffff',
         tooltipBorder: '#e5eaf0',
       };

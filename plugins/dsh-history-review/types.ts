@@ -3,8 +3,8 @@
  *
  * 牛市复盘与熊市复盘共用一套中性类型（`Review*`）：轮次档案 / 四阶段 / 事件线 /
  * 错配画像由 `rounds.ts`（牛）与 `bears.ts`（熊）硬编码，是不可变的历史复盘观点；
- * 行情数据（`MonthlyBar`）为指数月 K，运行时经新浪源拉取后落 `ctx.db`。
- * 页面上的涨幅 / 回撤等数字一律由 `judge.ts` 从月 K 回算，文案只做定性结论。
+ * 行情数据（`KlineBar`）为指数周 K，运行时经新浪源拉取后落 `ctx.db`。
+ * 页面上的涨幅 / 回撤等数字一律由 `judge.ts` 从周 K 回算，文案只做定性结论。
  */
 
 /** 段落形态分类：牛市 = 瓦解形态（A 跌停潮 / B 中军先滞涨 / C 权重阴跌）；熊市 = 触发杀法（A 流动性急杀 / B 盈利阴跌 / C 制度筹码冲击） */
@@ -77,7 +77,7 @@ export interface ReviewRoundMeta {
   status: string;
   /**
    * 行情窗口：start 起点月 / peak 见顶（熊市为见底转折参考）月 / end 结束月。
-   * `end: null` = 进行中轮次，窗口自动延伸到月 K 最新一根（数据与图表随同步推进）。
+   * `end: null` = 进行中轮次，窗口自动延伸到周 K 最新一根（数据与图表随同步推进）。
    */
   window: { start: string; peak: string; end: string | null };
   /** 统计区间展示文案（如 `2016.01 – 2022.04`） */
@@ -102,9 +102,11 @@ export interface ReviewRoundMeta {
   review: string;
 }
 
-/** 指数月 K 单根 */
-export interface MonthlyBar {
-  /** 月份（YYYY-MM） */
+/** 指数周 K 单根（静态 JSON 元组展开后） */
+export interface KlineBar {
+  /** 周截止日期（YYYY-MM-DD，即该交易周最后一个交易日） */
+  date: string;
+  /** 所属月份（YYYY-MM，取周截止日；窗口 / 阶段区间仍按月字典序比对） */
   month: string;
   /** 开盘 */
   open: number;
@@ -114,9 +116,11 @@ export interface MonthlyBar {
   low: number;
   /** 收盘 */
   close: number;
+  /** 周成交量（手，腾讯源口径） */
+  volume: number;
 }
 
-/** 由月 K 回算的一轮牛市统计（页面所有数字的来源） */
+/** 由周 K 回算的一轮牛市统计（页面所有数字的来源） */
 export interface ReviewRoundStats {
   /** 起点月 */
   startMonth: string;
@@ -142,7 +146,7 @@ export interface ReviewRoundStats {
   endClose: number;
 }
 
-/** 由月 K 回算的一轮熊市统计 */
+/** 由周 K 回算的一轮熊市统计 */
 export interface ReviewBearStats {
   /** 起点月（顶部区起点） */
   startMonth: string;

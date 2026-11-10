@@ -16,7 +16,7 @@ export const BREADTH_PLUGIN_ID = 'dsh-market-breadth';
 export const BREADTH_PLUGIN_NAME = '市场宽度';
 
 /** 插件版本（与 manifest.json 保持一致，构建脚本会校验） */
-export const BREADTH_PLUGIN_VERSION = '1.3.1';
+export const BREADTH_PLUGIN_VERSION = '1.4.0';
 
 /** 左侧导航菜单路径（沿用宿主内置页的历史路径，老书签直达；宿主删自带页后由本插件接管） */
 export const BREADTH_MENU_PATH = '/market-breadth';

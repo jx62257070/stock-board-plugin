@@ -2,7 +2,7 @@
 import { BULL_CHART_HEIGHT_PX } from '../constants';
 
 /**
- * 行情阶段图占位（首次同步未完成 / 窗口数据不足两根月 K 时）
+ * 行情阶段图占位（静态数据缺失 / 窗口数据不足两根周 K 时）
  */
 defineProps<{
   /** 叠加指数名（文案用） */
@@ -15,6 +15,6 @@ defineProps<{
     class="flex items-center justify-center rounded-lg bg-flat-weak text-xs text-text-secondary"
     :style="{ height: `${BULL_CHART_HEIGHT_PX}px` }"
   >
-    首次同步完成后渲染（正在拉取 {{ roundName }} 月K…）
+    静态数据加载后渲染（{{ roundName }} 周K…）
   </div>
 </template>

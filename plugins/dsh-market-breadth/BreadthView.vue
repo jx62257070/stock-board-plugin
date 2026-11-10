@@ -591,6 +591,7 @@ const runAiAnalysis = async (): Promise<void> => {
             </span>
           </div>
           <SvgBreadthChart
+            :kind="option.value"
             :dates="windowDates"
             :values="cardSeries(option.value).values"
             :ma="cardSeries(option.value).ma"

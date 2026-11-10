@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
-import dayjs from 'dayjs';
-import type { ReviewDeps, ReviewRuntime } from '../deps';
+import { computed, ref } from 'vue';
+import type { ReviewDeps } from '../deps';
 import CollapseReviewCard from './CollapseReviewCard.vue';
 import ModeLibraryView from './ModeLibraryView.vue';
 import RoundArchiveCard from './RoundArchiveCard.vue';
@@ -12,31 +11,28 @@ import SvgTimelineChart from './SvgTimelineChart.vue';
 import { buildBearStats, buildRoundStats } from '../judge';
 import { BULL_ROUNDS } from '../rounds';
 import { BEAR_ROUNDS } from '../bears';
+import { WEEKLY_SERIES } from '../weekly-data';
 import {
   BULL_VIEW_TABS,
   BULL_VIEW_TAB_DEFAULT,
   BULL_VIEW_TAB_LIBRARY,
-  HISTORY_REVIEW_AUTO_RESYNC_MS,
 } from '../constants';
 import type { ReviewRoundMeta, ReviewStageTone } from '../types';
 
 /**
  * 历史牛熊复盘 · 根视图（历史牛市 / 历史熊市 / 模式库）
  *
- * - 首次进入（存储为空）自动低频拉取各指数月 K（串行 + 500ms 错峰）写插件 storage，
- *   此后读快照渲染零联网；「更新到最新」手动增量刷新；
- * - 全部数字由 `judge.ts` 从月 K 回算，文案为定性复盘观点；
- * - 卡片 / 页签 / 按钮消费宿主 `app:ui`（deps.ui），行情图为 SVG 手绘（SvgTimelineChart）。
+ * - 行情数据为随插件打包的静态周 K（weekly-data.ts，零请求零存储）；
+ * - 全部数字由 `judge.ts` 从周 K 回算，文案为定性复盘观点；
+ * - 卡片 / 页签 / 按钮消费宿主 `app:ui`（deps.ui），行情图为 ECharts（SvgTimelineChart）。
  */
-const props = defineProps<{
+defineProps<{
   /** 宿主能力依赖（app:ui） */
   deps: ReviewDeps;
-  /** 数据运行时（repo / 批量取数 / storage，plugin.ts 组装） */
-  runtime: ReviewRuntime;
 }>();
 
-/** 牛市默认展示的轮次（核心资产·白酒抱团：C 类样本最完整） */
-const BULL_DEFAULT_ROUND_ID = 'core-asset';
+/** 牛市默认展示的轮次（本轮科技 AI 抱团：最新一轮，复盘参考价值最高） */
+const BULL_DEFAULT_ROUND_ID = 'ai-tech';
 
 /** 熊市默认展示的轮次（国有股减持大熊市：第一轮制度熊） */
 const BEAR_DEFAULT_ROUND_ID = 'state-share-bear';
@@ -66,15 +62,6 @@ const activeBullRoundId = ref<string>(BULL_DEFAULT_ROUND_ID);
 /** 熊市轮次页签 */
 const activeBearRoundId = ref<string>(BEAR_DEFAULT_ROUND_ID);
 
-/** 正在同步 */
-const syncing = ref(false);
-
-/** 同步失败信息（空串 = 无错误） */
-const syncError = ref('');
-
-/** 同步进度文案（空串 = 不展示） */
-const progressText = ref('');
-
 /** 当前行情方向（模式库页签沿用上次方向，仅用于图例与口径） */
 const mode = computed<'bull' | 'bear'>(() => (marketTab.value === 'bear' ? 'bear' : 'bull'));
 
@@ -103,19 +90,9 @@ const activeRoundId = computed<string>({
   },
 });
 
-/** 当前快照（响应式：同步落库后自动更新） */
-const snapshot = computed(() => props.runtime.repo.snapshot());
-
-/** 最近同步时间的展示文案 */
-const syncedAtText = computed(() =>
-  snapshot.value.syncedAt === null
-    ? '未同步'
-    : dayjs(snapshot.value.syncedAt).format('YYYY-MM-DD HH:mm'),
-);
-
-/** 当前轮次的指数月 K */
+/** 当前轮次的指数周 K（静态数据直读） */
 const activeBars = computed(() =>
-  activeRound.value ? (snapshot.value.series[activeRound.value.indexSymbol] ?? []) : [],
+  activeRound.value ? (WEEKLY_SERIES[activeRound.value.indexSymbol] ?? []) : [],
 );
 
 /** 当前轮次的回算统计（牛 / 熊各自口径） */
@@ -133,36 +110,6 @@ const stageLegend = computed(() =>
     dot: TONE_DOT_CLASS[mode.value][stage.tone],
   })),
 );
-
-/**
- * 执行一次全量同步（拉取全部指数月 K 并落库；串行错峰，失败不中断已完成的指数）
- */
-const runSync = async (): Promise<void> => {
-  if (syncing.value) return;
-  syncing.value = true;
-  syncError.value = '';
-  try {
-    const series = await props.runtime.fetchAllMonthlies((done, total, name) => {
-      progressText.value = `拉取 ${name}（${done + 1}/${total}）`;
-    });
-    const bars: Record<string, number> = {};
-    for (const [symbol, list] of Object.entries(series)) bars[symbol] = list.length;
-    await props.runtime.repo.saveSync(series, { syncedAt: Date.now(), bars });
-  } catch (error) {
-    syncError.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    syncing.value = false;
-    progressText.value = '';
-  }
-};
-
-onMounted(() => {
-  // 库空 → 首拉；快照超过 12h → 静默重同步（进行中轮次的数据跟到当前）；否则读库零联网
-  const syncedAt = props.runtime.repo.snapshot().syncedAt;
-  if (syncedAt === null || Date.now() - syncedAt > HISTORY_REVIEW_AUTO_RESYNC_MS) {
-    void runSync();
-  }
-});
 </script>
 
 <template>
@@ -175,33 +122,14 @@ onMounted(() => {
         v-model="activeRoundId"
         :options="roundTabOptions"
       />
-      <div class="ml-auto flex items-center gap-2">
-        <span v-if="syncing" class="text-xs text-text-secondary">{{ progressText || '同步中…' }}</span>
-        <span v-else class="text-xs text-text-subtle">月K更新于 {{ syncedAtText }}</span>
-        <component
-          :is="deps.ui.Button"
-          variant="ghost"
-          :disabled="syncing"
-          @click="runSync"
-        >
-          更新到最新
-        </component>
-      </div>
     </div>
-
-    <p
-      v-if="syncError"
-      class="rounded-lg bg-up-weak px-3 py-2 text-xs text-up"
-    >
-      同步失败：{{ syncError }}（网络恢复后可再次点击「更新到最新」）
-    </p>
 
     <ModeLibraryView
       v-if="marketTab === BULL_VIEW_TAB_LIBRARY"
       :deps="deps"
       :bull-rounds="BULL_ROUNDS"
       :bear-rounds="BEAR_ROUNDS"
-      :series="snapshot.series"
+      :series="WEEKLY_SERIES"
     />
 
     <template v-else-if="activeRound">
@@ -209,7 +137,7 @@ onMounted(() => {
         <RoundArchiveCard :round="activeRound" :stats="activeStats" :mode="mode" />
       </component>
 
-      <component :is="deps.ui.Card" :title="`行情阶段 · ${activeRound.indexName}月K`">
+      <component :is="deps.ui.Card" :title="`行情阶段 · ${activeRound.indexName}周K`">
         <template #extra>
           <div class="flex items-center gap-3 text-xs text-text-secondary">
             <span v-for="legend in stageLegend" :key="legend.name" class="flex items-center gap-1">
@@ -221,7 +149,7 @@ onMounted(() => {
         <SvgTimelineChart v-if="activeBars.length >= 2" :round="activeRound" :bars="activeBars" :mode="mode" />
         <RoundTimelinePlaceholder v-else :round-name="activeRound.indexName" />
         <p class="mt-2 text-xs text-text-subtle">
-          色带为复盘档案声明的阶段区间；顶 / 底与涨跌幅度由 judge.ts 从月K回算，关键位月份以数据为准。
+          色带为复盘档案声明的阶段区间；顶 / 底与涨跌幅度由 judge.ts 从周K回算（静态数据，随插件版本更新）。
         </p>
       </component>
 
@@ -254,7 +182,7 @@ onMounted(() => {
 
     <p class="rounded-lg bg-flat-weak px-3 py-2 text-xs leading-relaxed text-text-secondary">
       复盘观点仅供参考，不构成投资建议。本页定位是沉淀历史模式用于对标：能识别「已确认的退潮 / 见底」，
-      不能预测崩盘或见底的具体时点；月K来自新浪源，落插件本地存储，重进页面不联网。
+      不能预测崩盘或见底的具体时点；周K为随插件打包的静态数据（腾讯源），不联网、进行中轮次随插件版本更新。
     </p>
   </div>
 </template>

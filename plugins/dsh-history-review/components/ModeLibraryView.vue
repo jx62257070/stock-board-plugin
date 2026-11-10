@@ -7,7 +7,7 @@ import { BEAR_PATTERNS } from '../bears';
 import { buildBearStats, buildRoundStats } from '../judge';
 import { BULL_TABLE_MIN_WIDTH } from '../constants';
 import type {
-  MonthlyBar,
+  KlineBar,
   ReviewBearStats,
   ReviewRoundMeta,
   ReviewRoundStats,
@@ -15,7 +15,7 @@ import type {
 
 /**
  * 全景模式库：牛 / 熊七轮横向对比表 + 可复用规律卡 + 四轮看板预警能力对比。
- * 涨幅 / 回撤由月 K 回算；定性结论来自 rounds.ts / bears.ts 的复盘框架沉淀。
+ * 涨幅 / 回撤由周 K 回算；定性结论来自 rounds.ts / bears.ts 的复盘框架沉淀。
  * 卡片与表格消费宿主 `app:ui`（deps.ui），与原生页面同风格。
  */
 const props = defineProps<{
@@ -25,24 +25,24 @@ const props = defineProps<{
   bullRounds: readonly ReviewRoundMeta[];
   /** 熊市轮次档案 */
   bearRounds: readonly ReviewRoundMeta[];
-  /** symbol → 月 K 序列（未同步的指数缺失时该行统计显示待同步） */
-  series: Record<string, MonthlyBar[]>;
+  /** symbol → 周 K 序列（静态数据；缺失的指数该行统计显示无数据） */
+  series: Readonly<Record<string, readonly KlineBar[]>>;
 }>();
 
 /** 牛市对比表行：轮次档案 + 回算统计 */
 interface BullCompareRow extends ReviewRoundMeta {
-  /** 回算统计（未同步为 null） */
+  /** 回算统计（无数据为 null） */
   stats: ReviewRoundStats | null;
 }
 
 /** 熊市对比表行：轮次档案 + 回算统计 */
 interface BearCompareRow extends ReviewRoundMeta {
-  /** 回算统计（未同步为 null） */
+  /** 回算统计（无数据为 null） */
   stats: ReviewBearStats | null;
 }
 
-/** 待同步占位文案 */
-const PENDING_TEXT = '待同步';
+/** 无数据占位文案 */
+const PENDING_TEXT = '无数据';
 
 /** 牛市对比表行数据（每轮的统计即时回算） */
 const bullRows = computed<BullCompareRow[]>(() =>
@@ -149,7 +149,7 @@ const bounceText = (row: BearCompareRow): string =>
   <div class="flex flex-col gap-3">
     <component :is="deps.ui.Card" title="七轮抱团牛市 · 横向对比">
       <template #extra>
-        <span class="text-xs text-text-subtle">涨幅 / 回撤由月 K 回算</span>
+        <span class="text-xs text-text-subtle">涨幅 / 回撤由周 K 回算</span>
       </template>
       <component
         :is="deps.ui.Table"
@@ -177,7 +177,7 @@ const bounceText = (row: BearCompareRow): string =>
 
     <component :is="deps.ui.Card" title="七轮大级别熊市 · 横向对比">
       <template #extra>
-        <span class="text-xs text-text-subtle">跌幅 / 反弹由月 K 回算</span>
+        <span class="text-xs text-text-subtle">跌幅 / 反弹由周 K 回算</span>
       </template>
       <component
         :is="deps.ui.Table"

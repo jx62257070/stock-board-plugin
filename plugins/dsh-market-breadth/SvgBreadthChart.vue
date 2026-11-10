@@ -2,18 +2,25 @@
 import { computed } from 'vue';
 import type { EChartsCoreOption } from 'echarts/core';
 import EChartBox from './EChartBox.vue';
+import { interpretBreadthValue } from './interpret';
 import { chartPalette, readCssVar, useChartThemeSignal } from './echarts-theme';
+import type { BreadthIndicatorKind } from './constants';
 
 /**
  * 市场宽度副图（ECharts 渲染，替代早期纯 SVG 手绘版）
  *
  * - 主线为主题色实线；可选均线为灰色虚线；可选基准线（ARMS y=1 / MCO y=0）为浅色虚线；
  * - 坐标轴可见：x 轴为日期（MM-DD，自动抽稀防重叠），y 轴为数值刻度 + 浅色分隔线；
- *   下方标注行只留区间高/低值；hover 出 axis tooltip；
+ *   下方标注行只留区间高/低值；
+ * - 十字准线 crosshair（axisPointer cross）：hover 时 x / y 双轴跟随标签（y 轴标签走统一
+ *   数值格式化），tooltip 除日期与主值 / 均值外，还按指标口径给出该值的白话解读
+ *   （好 / 坏判定 + 含义，涨跌语义色）；
  * - 主题跟随：颜色经 useChartThemeSignal 响应明暗 / 主题色切换后重算 option。
  */
 
 const props = defineProps<{
+  /** 指标种类（tooltip 解读按 kind 走对应阈值口径） */
+  kind: BreadthIndicatorKind;
   /** 日期序列（与 values 按下标对齐） */
   dates: string[];
   /** 主指标序列（null 为缺口，断线） */
@@ -25,6 +32,18 @@ const props = defineProps<{
   /** 数值格式化（极值标注与 tooltip 用；缺省两位小数） */
   format?: (value: number) => string;
 }>();
+
+/**
+ * 语义档位 → 文字色（跟随宿主涨跌配色主题）
+ * @param tone 语义档位
+ * @returns CSS 颜色值
+ */
+const toneColor = (tone: 'up' | 'down' | 'flat'): string =>
+  tone === 'up'
+    ? 'var(--color-up-strong)'
+    : tone === 'down'
+      ? 'var(--color-down-strong)'
+      : 'var(--color-flat)';
 
 /** 主题信号（html class / data-theme 变化时翻转，驱动 option 重算） */
 const themeSignal = useChartThemeSignal();
@@ -64,7 +83,10 @@ interface TooltipParam {
 }
 
 /**
- * tooltip 文本组装（日期 + 主值 + 均值）
+ * tooltip 文本组装（日期 + 主值 + 均值 + 白话解读）
+ *
+ * 解读复用 interpretBreadthValue：按指标阈值口径把当前值翻成「好 / 坏 + 含义」
+ * 一句话，ADL 口径用同刻的均线值比强弱；解读行带涨跌语义色。
  * @param raw ECharts 透传的 formatter 参数（unknown 收敛）
  * @returns HTML 文本
  */
@@ -72,11 +94,15 @@ const tooltipFormatter = (raw: unknown): string => {
   const params = (Array.isArray(raw) ? raw : [raw]) as TooltipParam[];
   const [main, ma] = params;
   if (!main) return '';
-  const lines = [`${main.name ?? ''}`];
+  const lines = [`<b>${main.name ?? ''}</b>`];
   if (main.data !== null && main.data !== undefined && Number.isFinite(main.data)) {
     lines.push(`值 ${fmt.value(main.data)}`);
+    const interpret = interpretBreadthValue(props.kind, main.data, ma?.data ?? null);
+    if (interpret) {
+      lines.push(`<span style="color:${toneColor(interpret.tone)}">▸ ${interpret.text}</span>`);
+    }
   }
-  if (ma?.data !== null && ma.data !== undefined && Number.isFinite(ma.data)) {
+  if (ma?.data !== null && ma?.data !== undefined && Number.isFinite(ma.data)) {
     lines.push(`MA ${fmt.value(ma.data)}`);
   }
   return lines.join('<br/>');
@@ -91,6 +117,19 @@ const option = computed<EChartsCoreOption>(() => {
     animation: false,
     tooltip: {
       trigger: 'axis',
+      // 十字准线：x / y 双轴跟随线 + 轴标签（y 轴标签走统一数值格式化）
+      axisPointer: {
+        type: 'cross',
+        lineStyle: { color: palette.axisPointer },
+        crossStyle: { color: palette.axisPointer },
+        label: {
+          fontSize: 10,
+          color: isDark ? '#dfe6ee' : '#3a4453',
+          backgroundColor: palette.tooltipBg,
+          borderColor: palette.tooltipBorder,
+          borderWidth: 1,
+        },
+      },
       backgroundColor: palette.tooltipBg,
       borderColor: palette.tooltipBorder,
       textStyle: { color: isDark ? '#dfe6ee' : '#3a4453', fontSize: 11 },
@@ -116,6 +155,14 @@ const option = computed<EChartsCoreOption>(() => {
       max,
       axisLine: { show: false },
       axisTick: { show: false },
+      axisPointer: {
+        show: true,
+        label: {
+          // y 轴准线标签与轴刻度同口径格式化
+          formatter: (param: { value: number }): string =>
+            Number.isFinite(param?.value) ? fmt.value(param.value) : '',
+        },
+      },
       axisLabel: {
         show: true,
         color: palette.text,
