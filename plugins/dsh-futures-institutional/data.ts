@@ -63,7 +63,8 @@ export interface FuturesDataApi {
    * @param memberName 席位（会员）名称
    * @param products 参与聚合的品种列表
    * @param endDay 锚点交易日 yyyyMMdd（含）
-   * @param days 回看披露日数量
+   * @param days 回看披露日数量（大数值 = 深历史，探测上限随之放宽）
+   * @param onProgress 每完成一个披露日的进度回调（done / total，深历史加载用）
    * @returns 时序数据（点列按交易日升序）
    */
   fetchMemberSeries: (
@@ -71,6 +72,7 @@ export interface FuturesDataApi {
     products: readonly string[],
     endDay: string,
     days?: number,
+    onProgress?: (done: number, total: number) => void,
   ) => Promise<CcpmMemberSeries>;
 }
 
@@ -199,6 +201,7 @@ const throttle = async (): Promise<void> => {
     products: readonly string[],
     endDay: string,
     days = CCPM_SERIES_DAYS,
+    onProgress?: (done: number, total: number) => void,
   ): Promise<CcpmMemberSeries> => {
     // 以第一个品种为日历锚点探测披露日序列（各品种披露日历一致）
     const anchor = await findLatestDay(products[0] ?? 'IF', endDay);
@@ -206,21 +209,27 @@ const throttle = async (): Promise<void> => {
       return { memberName, products, points: [] };
     }
 
-    // 从锚点继续向前收齐 days 个披露日（同一次探测循环，复用已拉数据）
+    // 从锚点继续向前收齐 days 个披露日（同一次探测循环，复用已拉数据）。
+    // 探测上限随 days 放宽（深历史 ~5 年也要能探够），下界保留原 45 自然日窗口
+    const probeLimit = Math.max(CCPM_SERIES_MAX_PROBE_DAYS, Math.ceil(days * 1.6) + 120);
     const dayList: string[] = [anchor.day];
     let cursor = dayjs(anchor.day, 'YYYYMMDD').subtract(1, 'day');
     let probed = 1;
-    while (dayList.length < days && probed < CCPM_SERIES_MAX_PROBE_DAYS) {
+    while (dayList.length < days && probed < probeLimit) {
       const day = cursor.format('YYYYMMDD');
-      const data = await fetchProductDay(products[0] ?? 'IF', day);
-      if (data) {
-        dayList.push(day);
+      // 周末不披露（中金所休息日），直接跳过不耗请求；仍计入探测数防死循环
+      if (cursor.day() !== 0 && cursor.day() !== 6) {
+        const data = await fetchProductDay(products[0] ?? 'IF', day);
+        if (data) {
+          dayList.push(day);
+        }
       }
       cursor = cursor.subtract(1, 'day');
       probed += 1;
     }
 
     // 逐披露日 × 逐品种拉取后按会员聚合（并发受限 + 错峰，避免对上游突发压力）
+    let doneDays = 0;
     const perDay = await mapWithConcurrency(
       dayList,
       async (day) => {
@@ -229,6 +238,8 @@ const throttle = async (): Promise<void> => {
           (product) => fetchProductDay(product, day),
           { concurrency: CCPM_FETCH_CONCURRENCY },
         );
+        doneDays += 1;
+        onProgress?.(doneDays, dayList.length);
         const valid = dayDataList.filter((item): item is CcpmProductDayData => item !== null);
         const aggregated = aggregateCcpmByMember(valid, memberName);
         const point: CcpmMemberDayPoint | null = aggregated[0]

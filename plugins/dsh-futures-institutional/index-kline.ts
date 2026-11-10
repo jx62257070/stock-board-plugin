@@ -32,6 +32,66 @@ interface TencentKlineResponse {
 /** 会话内缓存：symbol → （date → 收盘价） */
 const closeCache = new Map<string, Map<string, number>>();
 
+/** 日 K 蜡烛（历史对照图用；中国惯例阳线红 / 阴线绿由渲染层按 open/close 判定） */
+export interface IndexCandle {
+  /** 交易日（yyyy-MM-dd） */
+  date: string;
+  /** 开盘点位 */
+  open: number;
+  /** 收盘点位 */
+  close: number;
+  /** 最高点位 */
+  high: number;
+  /** 最低点位 */
+  low: number;
+}
+
+/** 会话内缓存：symbol → （date → 蜡烛） */
+const candleCache = new Map<string, Map<string, IndexCandle>>();
+
+/**
+ * 拉取单只指数的日 K 蜡烛表（会话缓存；失败抛错由调用方决定降级）
+ *
+ * 腾讯接口单请求实测可返回 1300+ 根（约 5 年交易日），一次拉满不做分页；
+ * @param http 宿主受控网络请求（app:http）
+ * @param symbol 腾讯符号形态（如 `sh000001`）
+ * @param totalDays 拉取的交易日条数
+ * @returns 交易日（yyyy-MM-dd）→ 蜡烛（按日期升序插入）
+ */
+export const fetchIndexCandles = async (
+  http: HttpService,
+  symbol: string,
+  totalDays: number,
+): Promise<Map<string, IndexCandle>> => {
+  const cached = candleCache.get(symbol);
+  if (cached) {
+    return cached;
+  }
+  const url = `${INDEX_COMBO_KLINE_URL}?param=${symbol},day,,,${totalDays},qfq`;
+  const response = await http.fetch(url, { headers: { Referer: INDEX_COMBO_KLINE_REFERER } });
+  if (!response.ok) {
+    throw new Error(`腾讯日K HTTP ${response.status}（${symbol}）`);
+  }
+  const body = (await response.json()) as TencentKlineResponse;
+  const rows = body.data?.[symbol]?.qfqday ?? body.data?.[symbol]?.day ?? [];
+  const map = new Map<string, IndexCandle>();
+  for (const row of rows) {
+    const date = row[0];
+    const open = Number(row[1]);
+    const close = Number(row[2]);
+    const high = Number(row[3]);
+    const low = Number(row[4]);
+    if (date && [open, close, high, low].every((value) => Number.isFinite(value) && value > 0)) {
+      map.set(date, { date, open, close, high, low });
+    }
+  }
+  if (map.size === 0) {
+    throw new Error(`腾讯日K无数据（${symbol}）`);
+  }
+  candleCache.set(symbol, map);
+  return map;
+};
+
 /**
  * 拉取单只指数的日 K 收盘表（会话缓存；失败抛错由调用方决定降级）
  * @param http 宿主受控网络请求（app:http）

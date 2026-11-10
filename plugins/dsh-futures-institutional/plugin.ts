@@ -30,10 +30,11 @@ import type { PluginDefinition } from '../../host/types/plugin.types';
 export const futuresInstitutionalPlugin: PluginDefinition = {
   id: FUTURES_INSTITUTIONAL_PLUGIN_ID,
   name: '期货·机构行为',
-  version: '1.3.1',
+  version: '1.4.0',
   description:
     '左侧导航新增「机构行为」看板：中金所 CCPM 成交持仓排名（代客口径、达标/前20会员）的多空席位行为观测 —— '
-    + '概览指标、席位总表（做多/做空/对冲标注）、多空柱状、净持仓时序、中信期货净增减 × 五大指数同画布对照曲线、移仓换月；'
+    + '概览指标、总表分组视图（中信期货 + 其他机构汇总，其他机构点开详情弹窗）、席位画像、多空柱状（中信 vs 其他汇总）、'
+    + '净持仓时序、中信期货净增减 × 五大指数同画布对照曲线、历史对照（中信净增减柱状 × 上证指数蜡烛，近5年可缩放）、移仓换月；'
     + '历史数据落本地插件库（「同步历史」一次性回填），重进页面不联网；'
     + '附 AI 分析入口与 get_ccpm_summary / get_ccpm_history 两只 Agent 只读工具。',
   author: '内置',

@@ -12,7 +12,7 @@
  */
 import { CCPM_CACHE_TTL_MS } from './constants';
 import type { PluginDatabase, PluginDbColumn, PluginDbRow } from '../../host/types/plugin.types';
-import type { CcpmProductDayData } from './types';
+import type { CcpmMemberDayPoint, CcpmProductDayData } from './types';
 
 /** 品种单日缓存表名（物理表 `plugin_<id>_ccpm_day_cache`） */
 export const CCPM_DAY_TABLE = 'ccpm_day_cache';
@@ -22,6 +22,9 @@ export const SYNC_META_TABLE = 'sync_meta';
 
 /** 同步元信息键：最近一次历史同步 */
 export const SYNC_META_KEY = 'last_sync';
+
+/** 同步元信息键：历史对照快照（中信净增减时序 + 上证蜡烛，免每次重拉 5 年数据） */
+export const HISTORY_SNAPSHOT_KEY = 'history_combo';
 
 /**
  * 品种单日缓存表的列声明
@@ -63,6 +66,22 @@ export interface FuturesSyncMeta {
   days: number;
   /** 参与回填的品种列表 */
   products: readonly string[];
+}
+
+/**
+ * 历史对照快照（落 sync_meta 键值表；重进页面 / 切披露日直接命中免回源）
+ *
+ * 蜡烛存元组数组而非对象数组，压缩 json 体积（1250 根 ≈ 60KB）。
+ */
+export interface HistoryComboSnapshot {
+  /** 锚点交易日 yyyyMMdd（生成快照时的 resolvedDay，换日需刷新） */
+  anchorDay: string;
+  /** 中信净增减时序点（按交易日升序） */
+  points: CcpmMemberDayPoint[];
+  /** 上证蜡烛元组 [日期, 开, 收, 高, 低] */
+  candles: [string, number, number, number, number][];
+  /** 写入时刻（毫秒时间戳） */
+  at: number;
 }
 
 /** 品种单日缓存表的一行（库内形态） */
@@ -118,6 +137,16 @@ export interface FuturesRepo {
    * @param meta 元信息
    */
   writeSyncMeta: (meta: FuturesSyncMeta) => Promise<void>;
+  /**
+   * 读历史对照快照
+   * @returns 快照；从未生成或结构损坏返回 null
+   */
+  readHistorySnapshot: () => Promise<HistoryComboSnapshot | null>;
+  /**
+   * 写历史对照快照（upsert；同键覆盖旧快照）
+   * @param snapshot 快照
+   */
+  writeHistorySnapshot: (snapshot: HistoryComboSnapshot) => Promise<void>;
 }
 
 /**
@@ -221,6 +250,43 @@ export const createFuturesRepo = async (db: PluginDatabase): Promise<FuturesRepo
         await db.update(SYNC_META_TABLE, rows[0].id, { meta_value: meta });
       } else {
         await db.insert(SYNC_META_TABLE, { meta_key: SYNC_META_KEY, meta_value: meta });
+      }
+    },
+
+    async readHistorySnapshot() {
+      const rows = await db.select<MetaRow>(SYNC_META_TABLE, {
+        where: { meta_key: HISTORY_SNAPSHOT_KEY },
+        limit: 1,
+      });
+      const value = rows[0]?.meta_value;
+      if (!value || typeof value !== 'object') {
+        return null;
+      }
+      const snapshot = value as Partial<HistoryComboSnapshot>;
+      if (
+        typeof snapshot.anchorDay !== 'string' ||
+        !Array.isArray(snapshot.points) ||
+        !Array.isArray(snapshot.candles)
+      ) {
+        return null;
+      }
+      return {
+        anchorDay: snapshot.anchorDay,
+        points: snapshot.points,
+        candles: snapshot.candles,
+        at: typeof snapshot.at === 'number' ? snapshot.at : 0,
+      };
+    },
+
+    async writeHistorySnapshot(snapshot) {
+      const rows = await db.select<MetaRow>(SYNC_META_TABLE, {
+        where: { meta_key: HISTORY_SNAPSHOT_KEY },
+        limit: 1,
+      });
+      if (rows[0]) {
+        await db.update(SYNC_META_TABLE, rows[0].id, { meta_value: snapshot });
+      } else {
+        await db.insert(SYNC_META_TABLE, { meta_key: HISTORY_SNAPSHOT_KEY, meta_value: snapshot });
       }
     },
   };

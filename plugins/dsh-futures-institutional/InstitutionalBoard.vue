@@ -10,6 +10,10 @@ import {
   CCPM_SCOPE_LABELS,
   FUTURES_PAGE_TEXT,
   FUTURES_INSTITUTIONAL_PLUGIN_ID,
+  HISTORY_COMBO_DAYS,
+  HISTORY_COMBO_SYMBOL,
+  HISTORY_KLINE_DAYS,
+  HISTORY_VIEW_DEFAULT_DAYS,
   INDEX_COMBO_INDEXES,
 } from './constants';
 import type { CcpmProductCode } from './constants';
@@ -22,8 +26,9 @@ import {
   filterCcpmRowsByInstrument,
 } from './compute';
 import { buildCcpmAnalysisPrompt } from './prompt';
-import { fetchIndexCloses } from './index-kline';
+import { fetchIndexCandles, fetchIndexCloses, type IndexCandle } from './index-kline';
 import { syncHistory } from './scan';
+import type { HistoryComboSnapshot } from './storage';
 import type { TableColumn } from '../../host/types/table.types';
 import type {
   CcpmAggregateRow,
@@ -42,8 +47,10 @@ import type {
  *
  * 数据源：中金所 CCPM 成交持仓排名每日披露 CSV（GBK，仅 HTTP）。页面编排：
  * 筛选器（品种 / 三档合并口径 / 合约 / 交易日 / 席位搜索）→ 数据边界提示 →
- * 概览指标卡 → 上榜会员总表（行展开 = 席位跨合约分解）+ 席位画像 →
- * 多空并排柱状 + 净持仓时序（ECharts 图，主题经 CSS 变量取色）→ 衍生榜单 → 移仓换月（折叠）→
+ * 概览指标卡 → 上榜会员总表（分组视图：中信期货 + 其他机构汇总，整行 100% 宽，
+ * 其他机构行点开详情弹窗，弹窗内含各家明细与跨合约展开）→ 席位画像（整行）→
+ * 历史对照（中信净增减柱状 × 上证指数蜡烛，近 5 年可缩放，快照持久化秒开）→
+ * 多空并排柱状（中信 vs 其他机构汇总两行）+ 净持仓时序 + 曲线对照 → 衍生榜单 → 移仓换月（折叠）→
  * 固定风险提示。历史回填由「同步历史」按钮触发（一次性任务，非轮询）。
  */
 
@@ -295,12 +302,8 @@ watch([stats, aggregates], ([s, a]) => {
     : (list[0]?.memberName ?? null);
 });
 
-/** 总表行（搜索过滤后） */
-const visibleStats = computed(() => stats.value.filter((row) => matchSearch(row.memberName)));
-/** 总表行（聚合口径，搜索过滤后） */
-const visibleAggregates = computed(() =>
-  aggregates.value.filter((row) => matchSearch(row.memberName)),
-);
+/** 「其他机构」汇总行的展示名（compute 层汇总行同名，主表行点击据此开详情弹窗） */
+const OTHERS_ROW_NAME = '其他机构汇总';
 
 /** 总表展示行（两种口径归一化后的形态，模板统一消费） */
 interface DisplayRow {
@@ -322,10 +325,10 @@ interface DisplayRow {
   tagReason: string | null;
 }
 
-/** 总表展示行（含搜索过滤；单合约与聚合口径归一化） */
-const displayRows = computed<readonly DisplayRow[]>(() => {
+/** 全部总表展示行（单合约与聚合口径归一化，未过滤；分组主表与详情弹窗共用数据源） */
+const allDisplayRows = computed<readonly DisplayRow[]>(() => {
   if (scope.value === 'contract') {
-    return visibleStats.value.map((row) => ({
+    return stats.value.map((row) => ({
       memberName: row.memberName,
       buy: row.buyPos,
       buyChg: row.buyChg,
@@ -336,7 +339,7 @@ const displayRows = computed<readonly DisplayRow[]>(() => {
       tagReason: row.tagReason,
     }));
   }
-  return visibleAggregates.value.map((row) => ({
+  return aggregates.value.map((row) => ({
     memberName: row.memberName,
     buy: row.totalBuy,
     buyChg: row.totalBuyChg,
@@ -347,6 +350,54 @@ const displayRows = computed<readonly DisplayRow[]>(() => {
     tagReason: row.tagReason,
   }));
 });
+
+/** 中信期货（代客）展示行（缺席 = 当日未上榜） */
+const zxDisplayRow = computed<DisplayRow | null>(
+  () => allDisplayRows.value.find((row) => row.memberName === DEFAULT_MEMBER) ?? null,
+);
+
+/** 其他机构汇总展示行（两口径归一化；除中信外无可计入行时为 null） */
+const othersSummaryRow = computed<DisplayRow | null>(() => {
+  if (scope.value !== 'contract' && othersAggregate.value) {
+    return {
+      memberName: OTHERS_ROW_NAME,
+      buy: othersAggregate.value.totalBuy,
+      buyChg: othersAggregate.value.totalBuyChg,
+      sell: othersAggregate.value.totalSell,
+      sellChg: othersAggregate.value.totalSellChg,
+      net: othersAggregate.value.totalNet,
+      tag: othersAggregate.value.tag,
+      tagReason: othersAggregate.value.tagReason,
+    };
+  }
+  if (scope.value === 'contract' && othersStats.value) {
+    return {
+      memberName: OTHERS_ROW_NAME,
+      buy: othersStats.value.buyPos,
+      buyChg: othersStats.value.buyChg,
+      sell: othersStats.value.sellPos,
+      sellChg: othersStats.value.sellChg,
+      net: othersStats.value.netPos,
+      tag: othersStats.value.tag,
+      tagReason: othersStats.value.tagReason,
+    };
+  }
+  return null;
+});
+
+/** 分组主表两行：中信期货 + 其他机构汇总 */
+const groupRows = computed<readonly DisplayRow[]>(() =>
+  [zxDisplayRow.value, othersSummaryRow.value].filter(
+    (row): row is DisplayRow => row !== null,
+  ),
+);
+
+/** 其他机构明细行（详情弹窗用：排除中信 + 席位搜索过滤） */
+const otherDetailRows = computed<readonly DisplayRow[]>(() =>
+  allDisplayRows.value
+    .filter((row) => row.memberName !== DEFAULT_MEMBER)
+    .filter((row) => matchSearch(row.memberName)),
+);
 
 /** 上榜会员总表列配置（app:ui Table 驱动；行 key = 席位名） */
 const tableColumns: TableColumn<DisplayRow>[] = [
@@ -390,10 +441,10 @@ const selectedAggregate = computed<CcpmAggregateRow | null>(
   () => aggregates.value.find((row) => row.memberName === selectedMember.value) ?? null,
 );
 
-/** 单合约口径：其余上榜会员汇总 */
+/** 单合约口径：除中信期货外其余上榜会员的汇总行（分组视图与画像对照共用） */
 const othersStats = computed<CcpmMemberStats | null>(() => {
   const data = dayData.value;
-  if (scope.value !== 'contract' || !selectedMember.value || !data) {
+  if (scope.value !== 'contract' || !data) {
     return null;
   }
   const target = instrument.value || data.instruments[0] || '';
@@ -401,15 +452,15 @@ const othersStats = computed<CcpmMemberStats | null>(() => {
   if (!totals || stats.value.length === 0) {
     return null;
   }
-  return computeCcpmOthersStats(stats.value, totals, selectedMember.value);
+  return computeCcpmOthersStats(stats.value, totals, DEFAULT_MEMBER);
 });
 
-/** 聚合口径：其余全部上榜会员汇总 */
+/** 聚合口径：除中信期货外其余全部上榜会员的汇总行 */
 const othersAggregate = computed<CcpmAggregateRow | null>(() => {
-  if (scope.value === 'contract' || !selectedMember.value) {
+  if (scope.value === 'contract' || activeDataList.value.length === 0) {
     return null;
   }
-  return aggregateCcpmOthers(activeDataList.value, selectedMember.value);
+  return aggregateCcpmOthers(activeDataList.value, DEFAULT_MEMBER);
 });
 
 /** 席位画像统一视图模型（单合约 / 聚合两口径归一化，画像卡单一消费） */
@@ -490,10 +541,14 @@ const others = computed<{ net: number; tagReason: string | null } | null>(() => 
   return null;
 });
 
-/** 其余上榜会员家数（画像卡汇总行文案用） */
-const othersCount = computed(() =>
-  scope.value === 'contract' ? Math.max(stats.value.length - 1, 0) : Math.max(aggregates.value.length - 1, 0),
-);
+/** 其他机构家数（当前口径上榜总数 − 中信是否在榜；画像卡与弹窗标题文案用） */
+const othersCount = computed(() => {
+  const total = scope.value === 'contract' ? stats.value.length : aggregates.value.length;
+  return Math.max(total - (zxDisplayRow.value ? 1 : 0), 0);
+});
+
+/** 「其他机构」详情弹窗开关 */
+const othersOpen = ref(false);
 
 /** 席位 → 跨合约分解原始行（总表任意行展开都用它，不挂在选中席位上） */
 const breakdownByMember = computed<Map<string, CcpmMemberRow[]>>(() => {
@@ -670,6 +725,28 @@ const onSelectMember = (memberName: string): void => {
 };
 
 /**
+ * 分组主表行点击：其他机构行 → 开详情弹窗；中信行 → 选中画像
+ * @param memberName 席位名
+ */
+const onGroupRowClick = (memberName: string): void => {
+  if (memberName === OTHERS_ROW_NAME) {
+    othersOpen.value = true;
+    return;
+  }
+  onSelectMember(memberName);
+};
+
+/**
+ * 详情弹窗行点击：选中该席位为画像并收起弹窗
+ * @param memberName 席位名
+ */
+const onPickDetailMember = (memberName: string): void => {
+  memberPicked.value = true;
+  selectedMember.value = memberName;
+  othersOpen.value = false;
+};
+
+/**
  * 展开 / 收起席位分解行
  * @param memberName 席位名
  */
@@ -756,14 +833,307 @@ const loadCombo = async (): Promise<void> => {
   }
 };
 
-// 披露日切换后旧对照数据作废
+// 披露日切换后旧对照数据作废；历史对照尝试从本地快照恢复（同锚点秒开）
 watch(resolvedDay, () => {
   combo.value = null;
   comboError.value = '';
+  historyCombo.value = null;
+  historyError.value = '';
+  historyStaleDay.value = '';
+  void restoreHistorySnapshot();
 });
+
+/* ==================== 历史对照：中信净增减柱状 × 上证指数蜡烛（近 5 年，可缩放） ==================== */
 
 /** 图表主题信号（html class / data-theme 变化时翻转，驱动 option 重算） */
 const themeSignal = useChartThemeSignal();
+
+/** 历史对照数据：中信全股指合并逐日净增减（近 5 年披露日）+ 上证指数日 K 蜡烛表 */
+const historyCombo = ref<{
+  /** 中信净增减时序点（按交易日升序） */
+  points: CcpmMemberDayPoint[];
+  /** 上证指数日 K 蜡烛（yyyy-MM-dd → 蜡烛） */
+  candles: Map<string, IndexCandle>;
+} | null>(null);
+
+/** 历史对照加载中 */
+const historyLoading = ref(false);
+
+/** 历史对照失败文案（空串 = 无错误） */
+const historyError = ref('');
+
+/** 历史对照加载进度文案（空串 = 未在拉取） */
+const historyProgress = ref('');
+
+/** 展示中的旧快照锚点日（换日后先展示旧快照再刷新时非空，yyyy-MM-dd） */
+const historyStaleDay = ref('');
+
+/**
+ * 快照蜡烛元组 → Map（损坏行跳过）
+ * @param tuples 快照蜡烛元组数组 [日期, 开, 收, 高, 低]
+ * @returns 蜡烛 Map（yyyy-MM-dd → 蜡烛）
+ */
+const toCandleMap = (tuples: HistoryComboSnapshot['candles']): Map<string, IndexCandle> => {
+  const map = new Map<string, IndexCandle>();
+  for (const [date, open, close, high, low] of tuples) {
+    if (date && [open, close, high, low].every((value) => Number.isFinite(value) && value > 0)) {
+      map.set(date, { date, open, close, high, low });
+    }
+  }
+  return map;
+};
+
+/**
+ * 蜡烛 Map → 快照元组（落库压缩 json 体积）
+ * @param candles 蜡烛 Map（yyyy-MM-dd → 蜡烛）
+ * @returns 快照蜡烛元组数组 [日期, 开, 收, 高, 低]
+ */
+const toCandleTuples = (
+  candles: Map<string, IndexCandle>,
+): HistoryComboSnapshot['candles'] =>
+  [...candles.values()].map((candle) => [
+    candle.date,
+    candle.open,
+    candle.close,
+    candle.high,
+    candle.low,
+  ]);
+
+/**
+ * 从本地快照恢复历史对照（仅同锚点日命中才使用；换日不恢复，避免新旧数据混淆）
+ */
+const restoreHistorySnapshot = async (): Promise<void> => {
+  if (historyCombo.value || historyLoading.value || !resolvedDay.value) {
+    return;
+  }
+  const snapshot = await props.runtime.repo.readHistorySnapshot().catch(() => null);
+  if (snapshot && snapshot.anchorDay === resolvedDay.value && snapshot.points.length >= 2) {
+    historyCombo.value = { points: snapshot.points, candles: toCandleMap(snapshot.candles) };
+  }
+};
+
+/**
+ * 加载历史对照数据（中信期货(代客) 全股指合并近 5 年逐日净增减 + 上证指数日 K 蜡烛）：
+ * - 同锚点快照命中 → 直接使用本地快照，不回源（秒开）；
+ * - 锚点日已更新（新披露日）→ 先展示旧快照（标注数据截止日），后台增量刷新；
+ * - 无快照 → 全量回填（逐日落 ctx.db 缓存，中断续传）；成功后写快照供下次秒开。
+ * @param force 跳过快照命中强制回源（「刷新」按钮）
+ */
+const loadHistoryCombo = async (force = false): Promise<void> => {
+  if (historyLoading.value || !resolvedDay.value) {
+    return;
+  }
+  const anchor = resolvedDay.value;
+  const snapshot = await props.runtime.repo.readHistorySnapshot().catch(() => null);
+  const usable =
+    snapshot && Array.isArray(snapshot.points) && snapshot.points.length >= 2 ? snapshot : null;
+  if (usable && usable.anchorDay === anchor && !force) {
+    historyCombo.value = { points: usable.points, candles: toCandleMap(usable.candles) };
+    historyStaleDay.value = '';
+    historyError.value = '';
+    return;
+  }
+  if (usable && usable.anchorDay !== anchor) {
+    // 换日：旧快照先顶上（清晰标注截止日），刷新完成后无缝替换
+    historyCombo.value = { points: usable.points, candles: toCandleMap(usable.candles) };
+    historyStaleDay.value = usable.anchorDay;
+  }
+  historyLoading.value = true;
+  historyError.value = '';
+  historyProgress.value = '准备中…';
+  try {
+    const [memberSeries, candles] = await Promise.all([
+      props.runtime.data.fetchMemberSeries(
+        DEFAULT_MEMBER,
+        CCPM_EQUITY_PRODUCT_ORDER,
+        resolvedDay.value,
+        HISTORY_COMBO_DAYS,
+        (done, total) => {
+          historyProgress.value = `席位数据 ${done}/${total} 个披露日`;
+        },
+      ),
+      fetchIndexCandles(props.runtime.deps.http, HISTORY_COMBO_SYMBOL, HISTORY_KLINE_DAYS),
+    ]);
+    historyCombo.value = { points: memberSeries.points, candles };
+    historyStaleDay.value = '';
+    // 快照落库：重进页面 / 同一披露日内重开秒开，不必重跑 1250 个披露日的聚合
+    await props.runtime.repo
+      .writeHistorySnapshot({
+        anchorDay: anchor,
+        points: memberSeries.points,
+        candles: toCandleTuples(candles),
+        at: Date.now(),
+      })
+      .catch(() => undefined);
+  } catch (error) {
+    // 无旧快照兜底才清空；有兜底则保留旧数据 + 错误提示
+    if (!historyStaleDay.value) {
+      historyCombo.value = null;
+    }
+    historyError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    historyLoading.value = false;
+    historyProgress.value = '';
+  }
+};
+
+/** 历史对照视图模型：日期轴 + 净增减柱 + 上证蜡烛（对齐） + tooltip 收盘查表 */
+interface HistoryChart {
+  /** 披露日标签（yyyy-MM-dd） */
+  labels: string[];
+  /** 净增减（手，与 labels 对齐） */
+  chgs: number[];
+  /** 上证蜡烛列（[开, 收, 低, 高]，与 labels 对齐；当日无 K 线为 null） */
+  candles: (number[] | null)[];
+  /** 蜡烛日 → 收盘价与前一蜡烛日收盘价（tooltip 涨跌幅用） */
+  quoteByDate: Map<string, { close: number; prevClose: number | null }>;
+  /** 柱状刻度上限（|净增减| 最大值） */
+  barMax: number;
+  /** dataZoom 初始起点百分比（默认聚焦最近 N 个披露日） */
+  startPct: number;
+}
+
+/** 历史对照图表数据（披露日不足两个时为 null，视图显示空态） */
+const historyChart = computed<HistoryChart | null>(() => {
+  const data = historyCombo.value;
+  if (!data || data.points.length < 2) {
+    return null;
+  }
+  // CCPM 交易日 yyyyMMdd → yyyy-MM-dd（与腾讯 K 线日期键对齐）
+  const labels = data.points.map(
+    (point) =>
+      `${point.tradingDay.slice(0, 4)}-${point.tradingDay.slice(4, 6)}-${point.tradingDay.slice(6, 8)}`,
+  );
+  const chgs = data.points.map((point) => point.totalNetChg);
+  const barMax = Math.max(1, ...chgs.map((value) => Math.abs(value)));
+  const candles: (number[] | null)[] = [];
+  const quoteByDate = new Map<string, { close: number; prevClose: number | null }>();
+  let prevClose: number | null = null;
+  for (const key of labels) {
+    const candle = data.candles.get(key);
+    if (candle) {
+      candles.push([candle.open, candle.close, candle.low, candle.high]);
+      quoteByDate.set(key, { close: candle.close, prevClose });
+      prevClose = candle.close;
+    } else {
+      candles.push(null);
+    }
+  }
+  const startPct = Math.max(0, (1 - HISTORY_VIEW_DEFAULT_DAYS / labels.length) * 100);
+  return { labels, chgs, candles, quoteByDate, barMax, startPct };
+});
+
+/**
+ * 历史对照：tooltip 文本组装（日期 + 净增减手数 + 上证 OHLC 与涨跌幅）
+ * @param raw ECharts 透传的 formatter 参数（unknown 收敛）
+ * @returns HTML 文本
+ */
+const historyTooltipFormatter = (raw: unknown): string => {
+  interface TooltipParam {
+    axisValue?: string;
+    seriesName?: string;
+    /** 柱状为数值；蜡烛为 [dataIndex, 开, 收, 低, 高]（4 元组时无 dataIndex 前缀） */
+    value?: number | number[] | null;
+  }
+  const params = (Array.isArray(raw) ? raw : [raw]) as TooltipParam[];
+  const lines: string[] = [params[0]?.axisValue ?? ''];
+  for (const param of params) {
+    if (param.seriesName === '中信净增减' && typeof param.value === 'number') {
+      if (Number.isFinite(param.value)) {
+        lines.push(`中信净增减 ${param.value.toLocaleString('en-US')} 手`);
+      }
+    } else if (param.seriesName === '上证指数' && Array.isArray(param.value)) {
+      const dims = param.value.length === 5 ? param.value.slice(1) : param.value;
+      const [open, close, low, high] = dims as number[];
+      if ([open, close, low, high].every((value) => Number.isFinite(value))) {
+        lines.push(`上证指数 开 ${open.toFixed(2)} · 收 ${close.toFixed(2)} · 低 ${low.toFixed(2)} · 高 ${high.toFixed(2)}`);
+        const quote = historyChart.value?.quoteByDate.get(param.axisValue ?? '');
+        if (quote && quote.prevClose !== null && quote.prevClose > 0) {
+          const pctChg = ((close - quote.prevClose) / quote.prevClose) * 100;
+          lines.push(`涨跌幅 ${pctChg >= 0 ? '+' : ''}${pctChg.toFixed(2)}%`);
+        }
+      }
+    }
+  }
+  return lines.join('<br/>');
+};
+
+/** 历史对照 ECharts 配置（双 y 轴：左净增减手数 / 右上证点位，dataZoom 缩放） */
+const historyOption = computed<EChartsCoreOption | null>(() => {
+  const chart = historyChart.value;
+  if (!chart) {
+    return null;
+  }
+  const isDark = themeSignal.value;
+  const palette = chartPalette(isDark);
+  const up = semanticColor('--color-up', '#dc2626');
+  const down = semanticColor('--color-down', '#16a34a');
+  const axisLabel = { color: palette.text, fontSize: 10 } as const;
+  return {
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: palette.tooltipBg,
+      borderColor: palette.tooltipBorder,
+      textStyle: { color: isDark ? '#dfe6ee' : '#3a4453', fontSize: 11 },
+      formatter: historyTooltipFormatter,
+    },
+    legend: {
+      data: ['中信净增减', '上证指数'],
+      textStyle: { color: palette.text, fontSize: 11 },
+      top: 0,
+    },
+    grid: { left: 8, right: 8, top: 26, bottom: 56, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: chart.labels,
+      axisLabel: { ...axisLabel, formatter: (value: string) => value.slice(2) },
+      axisLine: { lineStyle: { color: palette.axisLine } },
+      axisTick: { show: false },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        name: '手',
+        nameTextStyle: { color: palette.text, fontSize: 10 },
+        min: -chart.barMax * 1.15,
+        max: chart.barMax * 1.15,
+        axisLabel: { ...axisLabel, formatter: (value: number) => value.toLocaleString('en-US') },
+        splitLine: { lineStyle: { color: palette.splitLine } },
+      },
+      {
+        type: 'value',
+        scale: true,
+        name: '点位',
+        nameTextStyle: { color: palette.text, fontSize: 10 },
+        axisLabel: { ...axisLabel, formatter: (value: number) => value.toFixed(0) },
+        splitLine: { show: false },
+      },
+    ],
+    dataZoom: [
+      { type: 'inside', start: chart.startPct, end: 100, zoomOnMouseWheel: true },
+      { type: 'slider', start: chart.startPct, end: 100, bottom: 10, height: 20 },
+    ],
+    series: [
+      {
+        name: '中信净增减',
+        type: 'bar',
+        data: chart.chgs.map((value) => ({
+          value,
+          itemStyle: { color: value >= 0 ? up : down, opacity: 0.85 },
+        })),
+        barMaxWidth: 14,
+      },
+      {
+        name: '上证指数',
+        type: 'candlestick',
+        yAxisIndex: 1,
+        data: chart.candles,
+        itemStyle: { color: up, color0: down, borderColor: up, borderColor0: down },
+      },
+    ],
+  };
+});
 
 /** 曲线对照视图模型：日期轴 + 净增减柱 + 归一化曲线 */
 interface ComboChart {
@@ -933,26 +1303,30 @@ const comboOption = computed<EChartsCoreOption | null>(() => {
   };
 });
 
-/** 柱状图取前 N 个席位 */
-const BAR_CHART_TOP = 10;
-
-/** 多空并排柱状图数据（聚合口径取 |净持仓| 前 N） */
+/** 多空并排柱状图数据：只看中信期货与其他机构汇总两行 */
 const barRows = computed(() => {
-  const source =
-    scope.value === 'contract'
-      ? stats.value.map((row) => ({
-          name: row.memberName,
-          buy: row.buyPos ?? 0,
-          sell: row.sellPos ?? 0,
-        }))
-      : aggregates.value.map((row) => ({
-          name: row.memberName,
-          buy: row.totalBuy,
-          sell: row.totalSell,
-        }));
-  return [...source]
-    .sort((a, b) => Math.abs(b.buy - b.sell) - Math.abs(a.buy - a.sell))
-    .slice(0, BAR_CHART_TOP);
+  if (scope.value === 'contract') {
+    const zx = stats.value.find((row) => row.memberName === DEFAULT_MEMBER);
+    const others = othersStats.value;
+    const rows: { name: string; buy: number; sell: number }[] = [];
+    if (zx) {
+      rows.push({ name: zx.memberName, buy: zx.buyPos ?? 0, sell: zx.sellPos ?? 0 });
+    }
+    if (others) {
+      rows.push({ name: OTHERS_ROW_NAME, buy: others.buyPos ?? 0, sell: others.sellPos ?? 0 });
+    }
+    return rows;
+  }
+  const zx = aggregates.value.find((row) => row.memberName === DEFAULT_MEMBER);
+  const others = othersAggregate.value;
+  const rows: { name: string; buy: number; sell: number }[] = [];
+  if (zx) {
+    rows.push({ name: zx.memberName, buy: zx.totalBuy, sell: zx.totalSell });
+  }
+  if (others) {
+    rows.push({ name: OTHERS_ROW_NAME, buy: others.totalBuy, sell: others.totalSell });
+  }
+  return rows;
 });
 
 /**
@@ -1274,7 +1648,7 @@ const runAiAnalysis = async (): Promise<void> => {
           :is="runtime.deps.ui.Input"
           v-model="search"
           type="search"
-          placeholder="搜索席位，如「中信期货」"
+          placeholder="搜索其他机构席位（用于详情弹窗）"
           class="w-56"
         />
         <span class="ml-auto flex items-center gap-3 text-xs text-text-secondary">
@@ -1341,60 +1715,68 @@ const runAiAnalysis = async (): Promise<void> => {
         </div>
       </div>
 
-      <!-- 上榜会员总表（app:ui Table：列配置驱动 + expandable + 作用域插槽）；与画像 6:4 并排 -->
-      <div class="grid grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+      <!-- 上榜会员总表（分组视图：中信期货 + 其他机构汇总；app:ui Table：列配置驱动 + expandable）；整行 100% 宽 -->
+      <component
+        :is="runtime.deps.ui.Card"
+        fill
+        class="min-w-0 w-full"
+        :title="scope === 'contract' ? `上榜会员总表 · ${instrument || instruments[0] || ''}` : '上榜会员总表（聚合口径）'"
+      >
+        <template #extra>
+          <span class="text-xs text-text-tertiary">点击中信行选中画像，点击「其他机构」行查看全部机构明细</span>
+        </template>
         <component
-          :is="runtime.deps.ui.Card"
-          fill
-          class="min-w-0"
-          :title="scope === 'contract' ? `上榜会员总表 · ${instrument || instruments[0] || ''}` : '上榜会员总表（聚合口径）'"
+          :is="runtime.deps.ui.Table"
+          :columns="tableColumns"
+          :rows="groupRows"
+          :row-key="rowKeyOf"
+          row-clickable
+          expandable
+          :expanded-keys="expandedMembers"
+          @row-click="onGroupRowClick($event.memberName)"
+          @toggle-expand="onToggleExpand($event.memberName)"
         >
-          <template #extra>
-            <span class="text-xs text-text-tertiary">点击行选中画像，点击行首箭头展开分解</span>
-          </template>
-          <component
-            :is="runtime.deps.ui.Table"
-            :columns="tableColumns"
-            :rows="displayRows"
-            :row-key="rowKeyOf"
-            row-clickable
-            expandable
-            :expanded-keys="expandedMembers"
-            @row-click="onSelectMember($event.memberName)"
-            @toggle-expand="onToggleExpand($event.memberName)"
-          >
-            <template #memberName="{ row }">
-              <!-- 宿主 Table 无选中态：席位名高亮即「当前画像行」的行内锚点 -->
-              <span :class="row.memberName === selectedMember ? 'text-primary font-semibold' : ''">
-                {{ row.memberName }}
+          <template #memberName="{ row }">
+            <!-- 其他机构行 = 汇总入口（可点击开弹窗）；中信行 = 当前画像锚点 -->
+            <template v-if="row.memberName === OTHERS_ROW_NAME">
+              <span class="cursor-pointer text-primary font-semibold underline decoration-dotted underline-offset-2">
+                {{ row.memberName }}（{{ othersCount }} 家汇总）
               </span>
             </template>
-            <template #buy="{ row }">
-              <span class="text-up">{{ row.buy?.toLocaleString('en-US') }}</span>
-            </template>
-            <template #buyChg="{ row }">
-              <span :class="signClass(row.buyChg ?? 0)">{{ signed(row.buyChg) }}</span>
-            </template>
-            <template #sell="{ row }">
-              <span class="text-down">{{ row.sell?.toLocaleString('en-US') }}</span>
-            </template>
-            <template #sellChg="{ row }">
-              <span :class="signClass(row.sellChg ?? 0)">{{ signed(row.sellChg) }}</span>
-            </template>
-            <template #net="{ row }">
-              <span :class="signClass(row.net ?? 0)">{{ row.net?.toLocaleString('en-US') }}</span>
-            </template>
-            <template #tag="{ row }">
-              <component
-                :is="runtime.deps.ui.Tag"
-                v-if="row.tag"
-                :tone="tagTone(row.tag)"
-              >
-                {{ FUTURES_PAGE_TEXT.tagLabels[row.tag] }}
-              </component>
-              <span v-else class="text-text-tertiary">--</span>
-            </template>
-            <template #expanded="{ row }">
+            <span v-else :class="row.memberName === selectedMember ? 'text-primary font-semibold' : ''">
+              {{ row.memberName }}
+            </span>
+          </template>
+          <template #buy="{ row }">
+            <span class="text-up">{{ row.buy?.toLocaleString('en-US') }}</span>
+          </template>
+          <template #buyChg="{ row }">
+            <span :class="signClass(row.buyChg ?? 0)">{{ signed(row.buyChg) }}</span>
+          </template>
+          <template #sell="{ row }">
+            <span class="text-down">{{ row.sell?.toLocaleString('en-US') }}</span>
+          </template>
+          <template #sellChg="{ row }">
+            <span :class="signClass(row.sellChg ?? 0)">{{ signed(row.sellChg) }}</span>
+          </template>
+          <template #net="{ row }">
+            <span :class="signClass(row.net ?? 0)">{{ row.net?.toLocaleString('en-US') }}</span>
+          </template>
+          <template #tag="{ row }">
+            <component
+              :is="runtime.deps.ui.Tag"
+              v-if="row.tag"
+              :tone="tagTone(row.tag)"
+            >
+              {{ FUTURES_PAGE_TEXT.tagLabels[row.tag] }}
+            </component>
+            <span v-else class="text-text-tertiary">--</span>
+          </template>
+          <template #expanded="{ row }">
+            <div v-if="row.memberName === OTHERS_ROW_NAME" class="text-xs text-text-tertiary">
+              点击「其他机构」行打开详情弹窗，查看各家机构的多空持仓与跨合约分解
+            </div>
+            <template v-else>
               <div class="text-xs text-text-tertiary">
                 {{ row.memberName }} · 跨合约分解（该席位上榜 {{ breakdownOf(row.memberName).length }} 个合约）
               </div>
@@ -1416,147 +1798,284 @@ const runAiAnalysis = async (): Promise<void> => {
                 >无披露明细</span>
               </div>
             </template>
-          </component>
+          </template>
         </component>
+      </component>
 
-        <!-- 席位画像（与总表并排）：净持仓 hero + 多空双格 + 结构条 + 行为判定 + 其余汇总 -->
-        <component
-          :is="runtime.deps.ui.Card"
-          :title="`席位画像${selectedMember ? ` · ${selectedMember}` : ''}`"
-        >
-          <template v-if="profile">
-            <!-- 净增减 hero：大号数字锚点（左）+ 净持仓次级展示（右） -->
-            <div class="flex items-start justify-between gap-2">
-              <div class="min-w-0">
-                <div class="text-sm font-medium text-text-tertiary">净增减（手）</div>
-                <div
-                  class="mt-1.5 text-3xl leading-none font-bold tracking-tight tabular-nums"
-                  :class="profile.netChg === null ? 'text-text-tertiary' : signClass(profile.netChg)"
-                >
-                  {{ signed(profile.netChg) }}
-                </div>
-              </div>
-              <div class="shrink-0 text-right">
-                <div class="text-sm font-medium text-text-tertiary">净持仓（手）</div>
-                <div
-                  class="mt-1.5 text-lg leading-none font-semibold tabular-nums"
-                  :class="signClass(profile.net)"
-                >
-                  {{ signed(profile.net) }}
-                </div>
+      <!-- 席位画像（总表下方整行）：净持仓 hero + 多空双格 + 结构条 + 行为判定 + 其余汇总 -->
+      <component
+        :is="runtime.deps.ui.Card"
+        :title="`席位画像${selectedMember ? ` · ${selectedMember}` : ''}`"
+      >
+        <template v-if="profile">
+          <!-- 净增减 hero：大号数字锚点（左）+ 净持仓次级展示（右） -->
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <div class="text-sm font-medium text-text-tertiary">净增减（手）</div>
+              <div
+                class="mt-1.5 text-3xl leading-none font-bold tracking-tight tabular-nums"
+                :class="profile.netChg === null ? 'text-text-tertiary' : signClass(profile.netChg)"
+              >
+                {{ signed(profile.netChg) }}
               </div>
             </div>
-
-            <!-- 多 / 空双格：弱色底区分两侧，增减为次级行 -->
-            <div class="mt-3 grid grid-cols-2 gap-2">
-              <div class="rounded-lg bg-up-weak px-2.5 py-2">
-                <div class="text-xs text-text-tertiary">多单（手）</div>
-                <div class="mt-1 text-base leading-none font-semibold text-up tabular-nums">
-                  {{ profile.buy.toLocaleString('en-US') }}
-                </div>
-                <div class="mt-1.5 text-xs leading-none text-up tabular-nums">
-                  增减 {{ signed(profile.buyChg) }}
-                </div>
-              </div>
-              <div class="rounded-lg bg-down-weak px-2.5 py-2">
-                <div class="text-xs text-text-tertiary">空单（手）</div>
-                <div class="mt-1 text-base leading-none font-semibold text-down tabular-nums">
-                  {{ profile.sell.toLocaleString('en-US') }}
-                </div>
-                <div class="mt-1.5 text-xs leading-none text-down tabular-nums">
-                  增减 {{ signed(profile.sellChg) }}
-                </div>
+            <div class="shrink-0 text-right">
+              <div class="text-sm font-medium text-text-tertiary">净持仓（手）</div>
+              <div
+                class="mt-1.5 text-lg leading-none font-semibold tabular-nums"
+                :class="signClass(profile.net)"
+              >
+                {{ signed(profile.net) }}
               </div>
             </div>
+          </div>
 
-            <!-- 结构条：聚合口径 → 上榜合约覆盖；单合约口径 → 多空占比 -->
-            <div v-if="profile.coveredCount !== null" class="mt-3">
+          <!-- 多 / 空双格：弱色底区分两侧，增减为次级行 -->
+          <div class="mt-3 grid grid-cols-2 gap-2">
+            <div class="rounded-lg bg-up-weak px-2.5 py-2">
+              <div class="text-xs text-text-tertiary">多单（手）</div>
+              <div class="mt-1 text-base leading-none font-semibold text-up tabular-nums">
+                {{ profile.buy.toLocaleString('en-US') }}
+              </div>
+              <div class="mt-1.5 text-xs leading-none text-up tabular-nums">
+                增减 {{ signed(profile.buyChg) }}
+              </div>
+            </div>
+            <div class="rounded-lg bg-down-weak px-2.5 py-2">
+              <div class="text-xs text-text-tertiary">空单（手）</div>
+              <div class="mt-1 text-base leading-none font-semibold text-down tabular-nums">
+                {{ profile.sell.toLocaleString('en-US') }}
+              </div>
+              <div class="mt-1.5 text-xs leading-none text-down tabular-nums">
+                增减 {{ signed(profile.sellChg) }}
+              </div>
+            </div>
+          </div>
+
+          <!-- 结构条：聚合口径 → 上榜合约覆盖；单合约口径 → 多空占比 -->
+          <div v-if="profile.coveredCount !== null" class="mt-3">
+            <div class="flex items-baseline justify-between text-xs">
+              <span class="text-text-secondary">上榜合约覆盖</span>
+              <span class="text-text tabular-nums">{{ profile.coveredCount }} / {{ profile.totalCount }}</span>
+            </div>
+            <div class="mt-1 h-1 rounded-full bg-flat">
+              <div
+                class="h-1 rounded-full bg-primary"
+                :style="{
+                  width: `${Math.min((profile.coveredCount / Math.max(profile.totalCount ?? 1, 1)) * 100, 100)}%`,
+                }"
+              />
+            </div>
+            <div v-if="selectedPartial" class="mt-1.5 text-xs leading-relaxed text-up-strong">
+              ⚠ {{ FUTURES_PAGE_TEXT.partialWarn }}
+            </div>
+          </div>
+          <div v-else class="mt-3 space-y-2">
+            <div>
               <div class="flex items-baseline justify-between text-xs">
-                <span class="text-text-secondary">上榜合约覆盖</span>
-                <span class="text-text tabular-nums">{{ profile.coveredCount }} / {{ profile.totalCount }}</span>
+                <span class="text-text-secondary">多单占比（占该合约上榜多单）</span>
+                <span class="text-text tabular-nums">{{ pct(profile.buyRatio) }}</span>
               </div>
               <div class="mt-1 h-1 rounded-full bg-flat">
                 <div
-                  class="h-1 rounded-full bg-primary"
-                  :style="{
-                    width: `${Math.min((profile.coveredCount / Math.max(profile.totalCount ?? 1, 1)) * 100, 100)}%`,
-                  }"
+                  class="h-1 rounded-full bg-up"
+                  :style="{ width: `${Math.min(profile.buyRatio ?? 0, 100)}%` }"
                 />
               </div>
-              <div v-if="selectedPartial" class="mt-1.5 text-xs leading-relaxed text-up-strong">
-                ⚠ {{ FUTURES_PAGE_TEXT.partialWarn }}
+            </div>
+            <div>
+              <div class="flex items-baseline justify-between text-xs">
+                <span class="text-text-secondary">空单占比（占该合约上榜空单）</span>
+                <span class="text-text tabular-nums">{{ pct(profile.sellRatio) }}</span>
+              </div>
+              <div class="mt-1 h-1 rounded-full bg-flat">
+                <div
+                  class="h-1 rounded-full bg-down"
+                  :style="{ width: `${Math.min(profile.sellRatio ?? 0, 100)}%` }"
+                />
               </div>
             </div>
-            <div v-else class="mt-3 space-y-2">
-              <div>
-                <div class="flex items-baseline justify-between text-xs">
-                  <span class="text-text-secondary">多单占比（占该合约上榜多单）</span>
-                  <span class="text-text tabular-nums">{{ pct(profile.buyRatio) }}</span>
-                </div>
-                <div class="mt-1 h-1 rounded-full bg-flat">
-                  <div
-                    class="h-1 rounded-full bg-up"
-                    :style="{ width: `${Math.min(profile.buyRatio ?? 0, 100)}%` }"
-                  />
-                </div>
-              </div>
-              <div>
-                <div class="flex items-baseline justify-between text-xs">
-                  <span class="text-text-secondary">空单占比（占该合约上榜空单）</span>
-                  <span class="text-text tabular-nums">{{ pct(profile.sellRatio) }}</span>
-                </div>
-                <div class="mt-1 h-1 rounded-full bg-flat">
-                  <div
-                    class="h-1 rounded-full bg-down"
-                    :style="{ width: `${Math.min(profile.sellRatio ?? 0, 100)}%` }"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <!-- 行为判定：标签 + 依据（弱底块收拢，与表格行为标注同一套文案） -->
-            <div class="mt-3 rounded-lg bg-flat-weak px-2.5 py-2">
-              <div class="flex items-center gap-2">
-                <span class="text-xs text-text-secondary">行为判定</span>
-                <component
-                  :is="runtime.deps.ui.Tag"
-                  v-if="profile.tag"
-                  :tone="tagTone(profile.tag)"
-                >
-                  {{ FUTURES_PAGE_TEXT.tagLabels[profile.tag] }}
-                </component>
-                <span v-else class="text-xs text-text-tertiary">--</span>
-              </div>
-              <div v-if="profile.tagReason" class="mt-1 text-xs leading-relaxed text-text-secondary">
-                {{ profile.tagReason }}
-              </div>
-            </div>
-
-            <!-- 其余上榜会员对照 + 判定规则：上方分格线，净字号对齐上方净增减 hero -->
-            <div class="mt-3 border-t border-flat-weak pt-3">
-              <div v-if="others" class="flex items-baseline justify-between gap-2">
-                <span class="min-w-0 truncate text-sm text-text-tertiary">其余 {{ othersCount }} 家上榜汇总</span>
-                <span
-                  class="shrink-0 text-3xl leading-none font-bold tracking-tight tabular-nums"
-                  :class="signClass(others.net)"
-                >
-                  净 {{ others.net.toLocaleString('en-US') }}
-                </span>
-              </div>
-
-              <div class="mt-2 text-xs leading-relaxed text-text-tertiary">{{ FUTURES_PAGE_TEXT.tagRule }}</div>
-            </div>
-          </template>
-          <div v-else class="py-8 text-center text-xs text-text-tertiary">
-            点击左侧总表席位行，查看该席位的多空画像与行为判定
           </div>
-        </component>
-      </div>
 
-      <!-- 多空并排柱状（ECharts 横向双系列，涨跌配色经 CSS 变量取语义色） -->
+          <!-- 行为判定：标签 + 依据（弱底块收拢，与表格行为标注同一套文案） -->
+          <div class="mt-3 rounded-lg bg-flat-weak px-2.5 py-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-text-secondary">行为判定</span>
+              <component
+                :is="runtime.deps.ui.Tag"
+                v-if="profile.tag"
+                :tone="tagTone(profile.tag)"
+              >
+                {{ FUTURES_PAGE_TEXT.tagLabels[profile.tag] }}
+              </component>
+              <span v-else class="text-xs text-text-tertiary">--</span>
+            </div>
+            <div v-if="profile.tagReason" class="mt-1 text-xs leading-relaxed text-text-secondary">
+              {{ profile.tagReason }}
+            </div>
+          </div>
+
+          <!-- 其余上榜会员对照 + 判定规则：上方分格线，净字号对齐上方净增减 hero -->
+          <div class="mt-3 border-t border-flat-weak pt-3">
+            <div v-if="others" class="flex items-baseline justify-between gap-2">
+              <span class="min-w-0 truncate text-sm text-text-tertiary">其余 {{ othersCount }} 家上榜汇总</span>
+              <span
+                class="shrink-0 text-3xl leading-none font-bold tracking-tight tabular-nums"
+                :class="signClass(others.net)"
+              >
+                净 {{ others.net.toLocaleString('en-US') }}
+              </span>
+            </div>
+
+            <div class="mt-2 text-xs leading-relaxed text-text-tertiary">{{ FUTURES_PAGE_TEXT.tagRule }}</div>
+          </div>
+        </template>
+        <div v-else class="py-8 text-center text-xs text-text-tertiary">
+          点击上方总表席位行，查看该席位的多空画像与行为判定
+        </div>
+      </component>
+
+      <!-- 历史对照：中信净增减柱状 × 上证指数蜡烛图（近 5 年披露日，dataZoom 缩放查看区间；快照持久化秒开） -->
       <component
         :is="runtime.deps.ui.Card"
-        :title="`多空并排柱状（|净持仓| 前 ${barRows.length}）`"
+        :title="`历史对照 · 中信净增减 × 上证指数蜡烛（近 ${historyChart?.labels.length ?? HISTORY_COMBO_DAYS} 个披露日）`"
+      >
+        <template #extra>
+          <span class="mr-2 text-xs text-text-tertiary">{{ historyProgress }}</span>
+          <component
+            :is="runtime.deps.ui.Button"
+            variant="ghost"
+            :disabled="historyLoading || !resolvedDay"
+            @click="void loadHistoryCombo(historyCombo !== null)"
+          >
+            {{ historyLoading ? '加载中…' : (historyCombo ? '刷新' : '加载历史对照') }}
+          </component>
+        </template>
+        <div v-if="historyError" class="rounded-lg bg-up-weak px-3 py-2 text-xs text-up">
+          加载失败：{{ historyError }}（可再次点击重试，已落库的披露日不会重拉）
+        </div>
+        <template v-else-if="historyChart && historyOption">
+          <div v-if="historyStaleDay" class="mb-1 text-xs text-text-tertiary">
+            当前展示快照数据（截至 {{ historyStaleDay }}），正在后台刷新到最新披露日，完成后自动替换…
+          </div>
+          <!-- 图例（HTML 渲染，色块与柱 / 蜡烛同色语义） -->
+          <div class="mb-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-secondary">
+            <span class="flex items-center gap-1.5">
+              <i class="inline-block h-2.5 w-2.5 rounded-sm bg-up" aria-hidden="true" />中信净增减为正（左轴·手）
+            </span>
+            <span class="flex items-center gap-1.5">
+              <i class="inline-block h-2.5 w-2.5 rounded-sm bg-down" aria-hidden="true" />中信净增减为负（左轴·手）
+            </span>
+            <span class="flex items-center gap-1.5">
+              <i class="inline-block h-3 w-2 rounded-sm bg-up" aria-hidden="true" />上证阳线
+            </span>
+            <span class="flex items-center gap-1.5">
+              <i class="inline-block h-3 w-2 rounded-sm bg-down" aria-hidden="true" />上证阴线（右轴·点位）
+            </span>
+          </div>
+          <div class="h-[420px] w-full" role="img" aria-label="中信净增减柱状与上证指数蜡烛历史对照图">
+            <EChartBox :options="historyOption" not-merge />
+          </div>
+          <p class="mt-1 text-xs leading-relaxed text-text-tertiary">
+            柱 = 中信期货(代客) IF/IH/IC/IM 合并逐日净增减（左轴·手，涨红跌绿）；蜡烛 = 上证指数日 K（右轴·点位，阳线红 / 阴线绿）。
+            滚轮或拖动底部滑块缩放查看指定区间（默认显示最近 {{ HISTORY_VIEW_DEFAULT_DAYS }} 个披露日，可缩放至近 {{ HISTORY_COMBO_DAYS }} 日 ≈ 5 年）。
+            净增减 ≠ 看多看空；重点观察中信大幅操作后的次日大盘走势。
+            首次加载需逐日回填近 5 年披露数据（较慢，中断后重试自动续传）；加载成功后快照落本地库，重进页面同披露日秒开，换披露日先展示旧快照再后台刷新，「刷新」按钮强制重拉。
+          </p>
+        </template>
+        <div v-else class="py-4 text-xs leading-relaxed text-text-tertiary">
+          点「加载历史对照」拉取中信期货(代客)近 {{ HISTORY_COMBO_DAYS }} 个披露日（≈ 5 年）的逐日净增减，
+          与上证指数日 K 蜡烛同画布对照，支持缩放查看指定区间——用于观察中信操作后次日大盘的走势。
+          首次加载较慢（逐日回填落本地缓存），中断后重试自动续传；加载成功后快照持久化，重进页面免重拉。
+        </div>
+      </component>
+
+      <!-- 「其他机构」详情弹窗：全部其他上榜机构明细（搜索过滤 + 跨合约展开 + 点行选画像） -->
+      <component
+        :is="runtime.deps.ui.Modal"
+        v-model:open="othersOpen"
+        :title="`其他机构明细（${othersCount} 家上榜汇总 · 点击行选中画像）`"
+      >
+        <div class="mb-2 flex items-center gap-2">
+          <component
+            :is="runtime.deps.ui.Input"
+            v-model="search"
+            type="search"
+            placeholder="搜索席位名称"
+            class="w-56"
+          />
+          <span class="text-xs text-text-tertiary">共 {{ otherDetailRows.length }} 家（排除中信期货）</span>
+        </div>
+        <component
+          :is="runtime.deps.ui.Table"
+          :columns="tableColumns"
+          :rows="otherDetailRows"
+          :row-key="rowKeyOf"
+          row-clickable
+          expandable
+          :expanded-keys="expandedMembers"
+          @row-click="onPickDetailMember($event.memberName)"
+          @toggle-expand="onToggleExpand($event.memberName)"
+        >
+          <template #memberName="{ row }">
+            <span :class="row.memberName === selectedMember ? 'text-primary font-semibold' : ''">
+              {{ row.memberName }}
+            </span>
+          </template>
+          <template #buy="{ row }">
+            <span class="text-up">{{ row.buy?.toLocaleString('en-US') }}</span>
+          </template>
+          <template #buyChg="{ row }">
+            <span :class="signClass(row.buyChg ?? 0)">{{ signed(row.buyChg) }}</span>
+          </template>
+          <template #sell="{ row }">
+            <span class="text-down">{{ row.sell?.toLocaleString('en-US') }}</span>
+          </template>
+          <template #sellChg="{ row }">
+            <span :class="signClass(row.sellChg ?? 0)">{{ signed(row.sellChg) }}</span>
+          </template>
+          <template #net="{ row }">
+            <span :class="signClass(row.net ?? 0)">{{ row.net?.toLocaleString('en-US') }}</span>
+          </template>
+          <template #tag="{ row }">
+            <component
+              :is="runtime.deps.ui.Tag"
+              v-if="row.tag"
+              :tone="tagTone(row.tag)"
+            >
+              {{ FUTURES_PAGE_TEXT.tagLabels[row.tag] }}
+            </component>
+            <span v-else class="text-text-tertiary">--</span>
+          </template>
+          <template #expanded="{ row }">
+            <div class="text-xs text-text-tertiary">
+              {{ row.memberName }} · 跨合约分解（该席位上榜 {{ breakdownOf(row.memberName).length }} 个合约）
+            </div>
+            <div class="mt-1 flex flex-wrap gap-2">
+              <span
+                v-for="item in breakdownOf(row.memberName)"
+                :key="item.instrumentId"
+                class="rounded-card bg-surface px-2 py-1 tabular-nums"
+              >
+                {{ item.instrumentId }}
+                多 <span class="text-up">{{ (item.buyPos ?? 0).toLocaleString('en-US') }}</span>
+                （<span :class="signClass(item.buyChg ?? 0)">{{ signed(item.buyChg) }}</span>）/
+                空 <span class="text-down">{{ (item.sellPos ?? 0).toLocaleString('en-US') }}</span>
+                （<span :class="signClass(item.sellChg ?? 0)">{{ signed(item.sellChg) }}</span>）
+              </span>
+              <span
+                v-if="breakdownOf(row.memberName).length === 0"
+                class="text-text-tertiary"
+              >无披露明细</span>
+            </div>
+          </template>
+        </component>
+      </component>
+
+      <!-- 多空并排柱状（ECharts 横向双系列，只看中信与其他机构汇总两行） -->
+      <component
+        :is="runtime.deps.ui.Card"
+        title="多空并排柱状（中信期货 vs 其他机构汇总）"
       >
         <!-- ECharts 横向双系列柱状（多单红 / 空单绿），高度随行数自适应 -->
         <div v-if="barOption" :style="{ height: `${barRows.length * 34 + 40}px` }">

@@ -112,6 +112,20 @@ export const INDEX_COMBO_INDEXES: readonly { symbol: string; name: string; color
   { symbol: 'sz399006', name: '创业板指', color: '#ec4899' },
 ];
 
+// ---------- 历史对照（中信净增减柱状 × 上证指数蜡烛图） ----------
+
+/** 历史对照回看的披露日数量（近 5 年 ≈ 1250 个交易日；首次拉取较慢，逐日落本地缓存可续） */
+export const HISTORY_COMBO_DAYS = 1250;
+
+/** 历史对照的指数（腾讯符号形态；上证指数——中信操作后次日大盘走势的观测基准） */
+export const HISTORY_COMBO_SYMBOL = 'sh000001';
+
+/** 历史对照指数日 K 拉取条数（实测腾讯单请求可返回 1300+ 根，一次拉满不分页） */
+export const HISTORY_KLINE_DAYS = 1300;
+
+/** 历史对照初始展示的交易日窗口（dataZoom 默认聚焦最近 N 个披露日，可缩放到全量） */
+export const HISTORY_VIEW_DEFAULT_DAYS = 120;
+
 // ---------- 页面文案（源自宿主 futures.constants.ts FUTURES_PAGE_TEXT） ----------
 
 /** 页面常驻文案（数据边界 / 口径提醒 / 风险提示，规范要求不可隐藏） */
