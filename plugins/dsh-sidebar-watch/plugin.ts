@@ -29,8 +29,10 @@
  * 已积累的盯盘候选与阈值一夜清空。改名的收益只是字面好看，代价是丢数据，不值得。
  */
 import WatchHeaderPanel from './WatchHeaderPanel.vue';
+import { watch } from 'vue';
 import { createWatchCandidateRepo } from './service';
 import { createWatchMonitor } from './monitor';
+import { createWatchTagsStore } from './tags';
 import { buildMarqueeLines } from './marquee';
 import { filterCandidatesByWatchlist } from './candidates';
 import {
@@ -57,9 +59,9 @@ const WATCH_HEADER_PANEL_KEY = `dsh-sidebar-watch#${WATCH_HEADER_ITEM_ID}`;
 export const sidebarWatchPlugin: PluginDefinition = {
   id: 'dsh-sidebar-watch',
   name: '自选盯盘',
-  version: '2.4.1',
+  version: '2.5.0',
   description:
-    '顶栏常驻盯盘入口：收起态单条轮播候选的名称 / 现价 / 涨跌幅，点开是完整清单（按自选分组归组，组头可展开收起）。在自选股「操作」列点「盯盘」逐只加入候选（候选与阈值存在插件自己的数据表里），可给每只票设价格 / 涨跌幅阈值，到价在右下角弹提醒；另附「打开自选股页」全局快捷键。2.0.0 起并入原「任务栏盯盘小组件」：同一份候选与引擎，可在 Windows 任务栏上方常驻一个置顶迷你条（插件设置里开关，默认开启，仅桌面端生效）。2.3.0 起气泡扩到六个视图（候选分组列表 / 板块热力 / 大盘走势 / 实时成交额 / 热点新闻 / 今天炒什么），头部 select 下拉切换。2.4.0 起气泡候选行可直接编辑阈值提醒（与顶栏面板同一份数据，实时互通），铃铛在明暗主题下常显。',
+    '顶栏常驻盯盘入口：收起态单条轮播候选的名称 / 现价 / 涨跌幅，点开是完整清单（按自选分组归组，组头可展开收起）。在自选股「操作」列点「盯盘」逐只加入候选（候选与阈值存在插件自己的数据表里），可给每只票设价格 / 涨跌幅阈值，到价在右下角弹提醒；另附「打开自选股页」全局快捷键。2.0.0 起并入原「任务栏盯盘小组件」：同一份候选与引擎，可在 Windows 任务栏上方常驻一个置顶迷你条（插件设置里开关，默认开启，仅桌面端生效）。2.3.0 起气泡扩到六个视图（候选分组列表 / 板块热力 / 大盘走势 / 实时成交额 / 热点新闻 / 今天炒什么），头部 select 下拉切换。2.4.0 起气泡候选行可直接编辑阈值提醒（与顶栏面板同一份数据，实时互通），铃铛在明暗主题下常显。2.5.0 起候选分类颜色升格为 watch:tags 公开服务，宿主自选股页的个股标签圆点与气泡圆点共用同一份映射、改色双向实时同步。',
   author: '内置',
   // 小浮窗的开关与参数走插件自带设置（宿主渲染通用表单），不再依赖宿主服务
   settings: WIDGET_SETTINGS_SECTION,
@@ -99,8 +101,14 @@ export const sidebarWatchPlugin: PluginDefinition = {
     // 建表 + 水合完成后才注册贡献点：顶栏轮播与行操作按钮都依赖仓储已就绪
     const repo = await createWatchCandidateRepo(ctx.db);
 
-    // 能力对外公开：其他插件 consume('watch:repo') 即可读写同一份候选池
+    // 个股分类标签（candidates 候选仓储之后创建：给 Tauri 端 storage 的 SQLite
+    // 水合让出一次事件循环，避免读到水合前的旧色映射 —— 见 tags.ts 的说明）
+    const tags = createWatchTagsStore(ctx.settings);
+
+    // 能力对外公开：其他插件 consume('watch:repo') 即可读写同一份候选池；
+    // 宿主自选股页经 services.consumeAs('watch:tags') 共享同一份标签色（双向同步）
     ctx.provide('watch:repo', repo);
+    ctx.provide('watch:tags', tags);
 
     const monitor = createWatchMonitor({ repo, logger: ctx.logger, deps });
     // 引擎不在组件里，生命周期挂在插件上：卸载即停轮询、并清掉自己弹过的浮窗
@@ -108,6 +116,27 @@ export const sidebarWatchPlugin: PluginDefinition = {
     // 引擎同样对外公开（1.4.0 起）：第三方插件读同一份报价快照，不会自建第二份轮询
     // （widget/ 小组件在本次合并后直接吃闭包里的实例，不走这个服务）
     ctx.provide('watch:monitor', monitor);
+
+    // ---------- 标签颜色记忆清理（2.5.0 起从 widget/mount.ts 上移） ----------
+    // 监听「候选池 ∪ 自选股」的符号全集：两处都不再有这只票才清颜色记忆。
+    // 为什么不能只看候选池：标签现在同时服务宿主自选股页（用户可以给任何
+    // 自选股打标，不一定是盯盘候选），只按候选池清理会让自选页打的标签在
+    // 候选增删时凭空消失；反过来只从盯盘移出（候选没了、自选还在）也该保留 ——
+    // 用户的规则是「哪里都不在了才回落白色」。
+    // 放在插件层而不是小组件里：浏览器端没有小组件，但标签服务照常工作。
+    ctx.effect(() =>
+      watch(
+        () => [...repo.list().map((item) => item.symbol), ...deps.watchlist.symbols()],
+        (symbols) => {
+          const live = new Set(symbols);
+          const current = tags.colors.value;
+          const kept = Object.entries(current).filter(([symbol]) => live.has(symbol));
+          if (kept.length === Object.keys(current).length) return;
+          tags.replaceAll(Object.fromEntries(kept));
+        },
+        { immediate: true },
+      ),
+    );
 
     ctx.header.add({
       id: WATCH_HEADER_ITEM_ID,
@@ -158,6 +187,7 @@ export const sidebarWatchPlugin: PluginDefinition = {
       await mountWatchWidget({
         repo,
         monitor,
+        tags,
         logger: ctx.logger,
         settings: ctx.settings,
         runtime: ctx.consume('kernel:runtime'),

@@ -28,6 +28,7 @@ import type { WatchWidgetColor, WatchWidgetMode, WatchWidgetPower } from './cons
 export type { WatchWidgetColor };
 import type { WatchMonitor } from '../monitor';
 import type { WatchCandidateRepo } from '../service';
+import type { WatchTagsStore } from '../tags';
 import type { WatchAlertKind } from '../alerts';
 
 /** 气泡内容视图（list / heatmap / market / turnover / news / hotboard，见 ./constants） */
@@ -259,6 +260,8 @@ export interface WatchWidgetMountOptions {
   repo: WatchCandidateRepo;
   /** 盯盘引擎（与顶栏盯盘主体同一份实例；小组件只消费 `quotes`，绝不取数） */
   monitor: WatchMonitor;
+  /** 个股分类标签存储（与顶栏盯盘主体同一份实例；行载荷圆点色从这里取） */
+  tags: WatchTagsStore;
   /** 插件日志器 */
   logger: PluginLogger;
   /** 插件设置存取（读 `widgetPower` / `widgetMode` / `widgetHideDelaySec` / `widgetPosition`） */

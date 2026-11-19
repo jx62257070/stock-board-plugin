@@ -14,7 +14,7 @@
  * 的全部贡献点（顶栏盯盘主体一并消失）。小组件只能缺席，不能同归于尽 ——
  * 所有分支都以 return 收尾，async 动作统一走 `safe()`，最后一丝意外交给调用方的 try/catch。
  */
-import { computed, ref, watch } from 'vue';
+import { computed, watch } from 'vue';
 import { isTauri } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { cursorPosition } from '@tauri-apps/api/window';
@@ -48,16 +48,13 @@ import {
 } from './constants';
 import {
   LEGACY_WATCH_WIDGET_PLUGIN_ID,
-  isWidgetColor,
   legacyWidgetInstalled,
   readBoardSource,
   readNewsSource,
-  readStockColors,
   readWidgetConfig,
   rememberBarPosition,
   rememberBoardSource,
   rememberNewsSource,
-  rememberStockColors,
 } from './settings';
 import { buildWatchContextList, buildWatchWidgetRows } from './presenter';
 import {
@@ -74,7 +71,6 @@ import type {
   WatchWidgetAlertPayload,
   WatchWidgetBoardPayload,
   WatchWidgetBoardRow,
-  WatchWidgetColor,
   WatchWidgetColorPayload,
   WatchWidgetHeatmapBoard,
   WatchWidgetIndexRow,
@@ -114,7 +110,7 @@ const LEGACY_CONFLICT_BODY =
  * @param options 挂载入参（含主体同一份 repo / monitor 实例）
  */
 export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promise<void> => {
-  const { repo, monitor, logger, settings, runtime, caps, effect, onDispose } = options;
+  const { repo, monitor, tags, logger, settings, runtime, caps, effect, onDispose } = options;
 
   // 浏览器端无窗口概念，整个小组件静默跳过
   if (!isTauri()) {
@@ -201,26 +197,14 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
   });
 
   /**
-   * 候选分类颜色映射（symbol → 色名；挂载时从插件 storage 水合）
-   *
-   * 持 reactive 副本而不是每次从 settings 现读：set-color 高频改写时
-   * 行载荷要立刻跟着变，且 settings 容器的响应式口径是宿主表单的内部约定，
-   * 不给「自定义键是否响应式」留赌注。
+   * 候选分类颜色映射已上移为插件的 `watch:tags` 服务（本插件 tags.ts）：
+   * 2.5.0 起宿主自选股页的个股标签圆点与这里的行载荷共用同一份 reactive 映射，
+   * 任何一端改色另一端即时跟随 —— 本文件只读 `tags.colors`、写走 `tags.setColor`。
    */
-  const colorBySymbol = ref<Record<string, WatchWidgetColor>>(readStockColors(settings));
-
-  /**
-   * 全量改写颜色映射：先改 reactive 副本（行载荷随之重算推送），再整表落库
-   * @param next 改写后的完整映射
-   */
-  const applyStockColors = (next: Record<string, WatchWidgetColor>): void => {
-    colorBySymbol.value = next;
-    rememberStockColors(settings, next);
-  };
 
   /** 推送给小组件窗口的展示行（引擎报价一变即重算） */
   const rows = computed(() =>
-    buildWatchWidgetRows(candidates.value, monitor.quotes.value, format, colorBySymbol.value),
+    buildWatchWidgetRows(candidates.value, monitor.quotes.value, format, tags.colors.value),
   );
 
   // ---------- 窗口句柄与显隐状态（仅主窗口侧持有） ----------
@@ -872,14 +856,13 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
         openStockInMain(event.payload.symbol);
       }),
     );
-    // 气泡里点圆点换分类颜色：校验后改写映射（reactive 副本 + 落库），
-    // 行载荷随副本重算，现有 watch(rows, pushLines) 会自动把新颜色推回条 / 气泡
+    // 气泡里点圆点换分类颜色：写走 watch:tags 服务（reactive 更新 + 落库都在里面），
+    // 行载荷随副本重算，现有 watch(rows, pushLines) 会自动把新颜色推回条 / 气泡，
+    // 宿主自选股页的标签圆点也由同一份 colors ref 即时跟随
     unlistens.push(
       await listen<WatchWidgetColorPayload>(WATCH_WIDGET_EVENTS.SET_COLOR, (event) => {
         const { symbol, color } = event.payload ?? {};
-        if (!symbol || !isWidgetColor(color)) return;
-        if (colorBySymbol.value[symbol] === color) return;
-        applyStockColors({ ...colorBySymbol.value, [symbol]: color });
+        tags.setColor(symbol, color);
       }),
     );
 
@@ -903,23 +886,9 @@ export const mountWatchWidget = async (options: WatchWidgetMountOptions): Promis
       }),
     );
 
-    // ---------- 取消盯盘 → 清除该候选的颜色记忆 ----------
-    // 监听的是候选池本体（repo.list）而不是过滤后的 candidates：从自选股移除
-    // （候选还在池里）不算「取消盯盘」，颜色要保留 —— 用户说的规则是只有把股票
-    // 从盯盘里移出，下次再加回来才回落白色。
-    effect(() =>
-      watch(
-        () => repo.list().map((item) => item.symbol),
-        (symbols) => {
-          const live = new Set(symbols);
-          const current = colorBySymbol.value;
-          const kept = Object.entries(current).filter(([symbol]) => live.has(symbol));
-          if (kept.length === Object.keys(current).length) return;
-          applyStockColors(Object.fromEntries(kept));
-        },
-        { immediate: true },
-      ),
-    );
+    // ---------- 标签颜色记忆清理已上移到 plugin.ts（2.5.0 起） ----------
+    // 保留规则改为「候选池 ∪ 自选股」都不再有这只票才清，且不依赖小组件挂载
+    // （浏览器端标签服务照常工作）—— 见 plugin.ts 的同名注释。
 
     // ---------- 摸鱼显隐（hover 模式：离开超时隐藏，角落热区唤回） ----------
     cursorTimer = window.setInterval(() => {
